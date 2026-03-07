@@ -327,13 +327,24 @@ async function sendResults(bot, chatId, score, total, category, svoEarned) {
 }
 
 // ── DICE: keyboards & text ────────────────────────────────────────────────────
-function diceLobbyKeyboard(users) {
-  // Quick pick: list of active users to challenge
-  const rows = users
-    .filter(u => u.username)
-    .slice(0, 8)
-    .map(u => [{ text: `👤 @${u.username}`, callback_data: `dice_challenge_${u.telegram_id}` }]);
-  rows.push([{ text: "🌍 Открытый вызов (любой)", callback_data: "dice_challenge_open" }]);
+function diceLobbyKeyboard(users, openGames) {
+  const rows = [];
+  // Active open challenges to join
+  if (openGames && openGames.length > 0) {
+    rows.push([{ text: "━━━ Открытые вызовы ━━━", callback_data: "dice_noop" }]);
+    for (const g of openGames) {
+      const initiator = db.getUser(g.initiator_id);
+      const name = initiator?.username ? `@${initiator.username}` : `id:${g.initiator_id}`;
+      rows.push([{ text: `✅ Вступить — ${name} (ставка ${g.bet}💵)`, callback_data: `dice_accept_${g.id}` }]);
+    }
+    rows.push([{ text: "━━━ Новый вызов ━━━", callback_data: "dice_noop" }]);
+  }
+  // Players to challenge directly
+  const knownUsers = users.filter(u => u.username).slice(0, 6);
+  for (const u of knownUsers) {
+    rows.push([{ text: `👤 @${u.username}`, callback_data: `dice_challenge_${u.telegram_id}` }]);
+  }
+  rows.push([{ text: "🌍 Открытый вызов (всем)", callback_data: "dice_challenge_open" }]);
   rows.push([{ text: "⬅️ Назад", callback_data: "menu_games" }]);
   return { inline_keyboard: rows };
 }
@@ -430,12 +441,22 @@ function mineBetKeyboard() {
 }
 
 // ── DUEL: keyboards & text ────────────────────────────────────────────────────
-function duelLobbyKeyboard(users) {
-  const rows = users
-    .filter(u => u.username)
-    .slice(0, 8)
-    .map(u => [{ text: `👤 @${u.username}`, callback_data: `duel_challenge_${u.telegram_id}` }]);
-  rows.push([{ text: "🌍 Открытый вызов", callback_data: "duel_challenge_open" }]);
+function duelLobbyKeyboard(users, openGames) {
+  const rows = [];
+  if (openGames && openGames.length > 0) {
+    rows.push([{ text: "━━━ Открытые вызовы ━━━", callback_data: "duel_noop" }]);
+    for (const g of openGames) {
+      const initiator = db.getUser(g.initiator_id);
+      const name = initiator?.username ? `@${initiator.username}` : `id:${g.initiator_id}`;
+      rows.push([{ text: `✅ Вступить — ${name} (ставка ${g.bet}💵)`, callback_data: `duel_accept_${g.id}` }]);
+    }
+    rows.push([{ text: "━━━ Новый вызов ━━━", callback_data: "duel_noop" }]);
+  }
+  const knownUsers = users.filter(u => u.username).slice(0, 6);
+  for (const u of knownUsers) {
+    rows.push([{ text: `👤 @${u.username}`, callback_data: `duel_challenge_${u.telegram_id}` }]);
+  }
+  rows.push([{ text: "🌍 Открытый вызов (всем)", callback_data: "duel_challenge_open" }]);
   rows.push([{ text: "⬅️ Назад", callback_data: "menu_games" }]);
   return { inline_keyboard: rows };
 }
@@ -903,15 +924,16 @@ bot.on("callback_query", async (query) => {
     // ── DICE ─────────────────────────────────────────────────────────
     // ════════════════════════════════════════════════════════════════════
 
-    if (data === "dice_menu") {
+    if (data === "dice_menu" || data === "dice_noop") {
       await bot.answerCallbackQuery(queryId);
+      if (data === "dice_noop") return;
       const users = db.getAllUsers()
         .map(u => db.getUser(u.telegram_id))
         .filter(u => u && u.telegram_id !== userId && u.username);
+      const openGames = db.getOpenDiceGames().filter(g => g.initiator_id !== userId);
       return bot.editMessageText(
-        `🎲 <b>Кости</b>\n\nВыбери соперника или брось открытый вызов:\n\n` +
-        `Правила: оба бросают кубик, больше — побеждает. При ничьей ставки возвращаются.`,
-        { chat_id: chatId, message_id: message.message_id, reply_markup: diceLobbyKeyboard(users), parse_mode: "HTML" }
+        `🎲 <b>Кости</b>\n\nВступи в открытый вызов или создай свой:\n\nПравила: оба бросают кубик, больше — побеждает. При ничьей ставки возвращаются.`,
+        { chat_id: chatId, message_id: message.message_id, reply_markup: diceLobbyKeyboard(users, openGames), parse_mode: "HTML" }
       );
     }
 
@@ -930,7 +952,6 @@ bot.on("callback_query", async (query) => {
 
     // Bet chosen
     if (data.startsWith("dice_bet_")) {
-      await bot.answerCallbackQuery(queryId);
       const parts = data.split("_"); // dice_bet_<amount>_<opponentData>
       const bet = parseInt(parts[2]);
       const opponentData = parts.slice(3).join("_");
@@ -938,8 +959,9 @@ bot.on("callback_query", async (query) => {
 
       const user = db.getUser(userId);
       if ((user?.svodollars || 0) < bet) {
-        return bot.answerCallbackQuery(queryId, { text: `❌ Недостаточно SVOлларов! Нужно ${bet}, у тебя ${user?.svodollars || 0}`, show_alert: true });
+        return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${bet} 💵, у тебя ${user?.svodollars || 0}`, show_alert: true });
       }
+      await bot.answerCallbackQuery(queryId);
 
       const gameId = db.createDiceGame(userId, opponentId, bet);
       if (!gameId) {
@@ -989,7 +1011,6 @@ bot.on("callback_query", async (query) => {
 
     // Dice rematch
     if (data.startsWith("dice_rematch_")) {
-      await bot.answerCallbackQuery(queryId);
       const parts = data.split("_"); // dice_rematch_<opponentId>_<bet>
       const opponentId = parseInt(parts[2]);
       const bet = parseInt(parts[3]);
@@ -997,6 +1018,7 @@ bot.on("callback_query", async (query) => {
       if ((user?.svodollars || 0) < bet) {
         return bot.answerCallbackQuery(queryId, { text: `❌ Недостаточно SVOлларов!`, show_alert: true });
       }
+      await bot.answerCallbackQuery(queryId);
       const gameId = db.createDiceGame(userId, opponentId, bet);
       const opponentUser = db.getUser(opponentId);
       const initiatorName = from.username ? `@${from.username}` : from.first_name;
@@ -1174,12 +1196,13 @@ bot.on("callback_query", async (query) => {
     }
 
     if (data.startsWith("mine_bet_")) {
-      await bot.answerCallbackQuery(queryId);
       const bet = parseInt(data.replace("mine_bet_", ""));
       const user = db.getUser(userId);
       if ((user?.svodollars || 0) < bet) {
+        // show_alert must be BEFORE any other answerCallbackQuery call
         return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${bet} 💵, у тебя ${user?.svodollars || 0}`, show_alert: true });
       }
+      await bot.answerCallbackQuery(queryId);
       const gameId = db.createMineGame(userId, bet);
       if (!gameId) return bot.sendMessage(chatId, "❌ Ошибка создания игры.");
       const game = db.getMineGame(gameId);
@@ -1187,7 +1210,7 @@ bot.on("callback_query", async (query) => {
         `💣 <b>Минное поле</b>\n\nСтавка: <b>${bet} 💵</b>\n\nНайди оба безопасных клетки! Удачи... 🍀`,
         { chat_id: chatId, message_id: message.message_id, reply_markup: mineBoardKeyboard(game), parse_mode: "HTML" }
       );
-      db.setMineMsgId(gameId, msg.message_id);
+      db.setMineMsgId(gameId, message.message_id);
       return;
     }
 
@@ -1209,20 +1232,26 @@ bot.on("callback_query", async (query) => {
       await bot.answerCallbackQuery(queryId);
 
       if (result.hitMine) {
-        // Show all mines
-        const lostGame = { ...result, board: result.board, revealed: Array(16).fill(true) };
         log.logMineResult(userId, game.bet, "lost", result.safe_found);
+        // Show full board: revealed cells + all mines exposed
+        const lostBoard = {
+          id: game.id,
+          bet: game.bet,
+          board: result.board,
+          revealed: result.board.map((isMine, i) => isMine || result.revealed[i]), // show all mines + already revealed
+          safe_found: result.safe_found,
+          status: "lost",
+        };
         try {
           await bot.editMessageText(
-            `💥 <b>БУМ! Ты нашёл мину!</b>\n\nСтавка <b>${game.bet} 💵</b> потеряна.\n\nВот где были безопасные клетки:`,
+            `💥 <b>БУМ! Ты нашёл мину!</b>\n\nСтавка <b>${game.bet} 💵</b> потеряна.\n\n💡 Вот где были все мины (💥) и безопасные клетки (✅):`,
             {
               chat_id: chatId, message_id: message.message_id,
-              reply_markup: mineBoardKeyboard(lostGame),
+              reply_markup: mineBoardKeyboard(lostBoard),
               parse_mode: "HTML",
             }
           );
         } catch(_) {}
-        // New game buttons
         await bot.sendMessage(chatId, "😢 Не повезло! Попробуешь ещё раз?", {
           reply_markup: {
             inline_keyboard: [
@@ -1265,7 +1294,8 @@ bot.on("callback_query", async (query) => {
         return bot.answerCallbackQuery(queryId, { text: "❌ Невозможно забрать.", show_alert: true });
       }
       const result = db.cashoutMine(gameId);
-      if (!result) return bot.answerCallbackQuery(queryId, { text: "❌ Ошибка.", show_alert: true });
+      if (!result) return bot.answerCallbackQuery(queryId, { text: "❌ Ошибка при выплате.", show_alert: true });
+      // Single answerCallbackQuery call for success path
       await bot.answerCallbackQuery(queryId, { text: `💰 Забрал ${result.payout} 💵!`, show_alert: true });
       log.logMineResult(userId, game.bet, "cashed", game.safe_found);
       return bot.editMessageText(
@@ -1287,21 +1317,22 @@ bot.on("callback_query", async (query) => {
     // ── DUEL ──────────────────────────────────────────────────────────
     // ════════════════════════════════════════════════════════════════════
 
-    if (data === "duel_menu") {
+    if (data === "duel_menu" || data === "duel_noop") {
       await bot.answerCallbackQuery(queryId);
+      if (data === "duel_noop") return;
       const users = db.getAllUsers()
         .map(u => db.getUser(u.telegram_id))
         .filter(u => u && u.telegram_id !== userId && u.username);
+      const openGames = db.getOpenDuelGames().filter(g => g.initiator_id !== userId);
       return bot.editMessageText(
-        `⚔️ <b>Дуэль</b>\n\nПравила:\n` +
+        `⚔️ <b>Дуэль</b>\n\nВступи в открытый вызов или создай свой:\n\n` +
         `• У каждого <b>3 HP ❤️</b>\n` +
-        `• Каждый раунд выбираешь: <b>⚔️ Атака</b>, <b>🛡 Защита</b>, <b>💨 Уклон</b>\n` +
-        `• Атака vs Уклон → атакующий наносит 1 урон\n` +
-        `• Атака vs Атака → оба теряют 1 HP\n` +
-        `• Атака vs Защита → урон заблокирован\n` +
-        `• Победитель забирает банк!\n\n` +
-        `Выбери соперника:`,
-        { chat_id: chatId, message_id: message.message_id, reply_markup: duelLobbyKeyboard(users), parse_mode: "HTML" }
+        `• Каждый раунд: <b>⚔️ Атака</b>, <b>🛡 Защита</b>, <b>💨 Уклон</b>\n` +
+        `• Атака vs Уклон → 1 урон\n` +
+        `• Атака vs Атака → оба -1 HP\n` +
+        `• Атака vs Защита → заблокировано\n` +
+        `• Победитель забирает банк!`,
+        { chat_id: chatId, message_id: message.message_id, reply_markup: duelLobbyKeyboard(users, openGames), parse_mode: "HTML" }
       );
     }
 
@@ -1318,7 +1349,6 @@ bot.on("callback_query", async (query) => {
     }
 
     if (data.startsWith("duel_bet_")) {
-      await bot.answerCallbackQuery(queryId);
       const parts = data.split("_"); // duel_bet_<amount>_<opponentData>
       const bet = parseInt(parts[2]);
       const opponentData = parts.slice(3).join("_");
@@ -1328,6 +1358,7 @@ bot.on("callback_query", async (query) => {
       if ((user?.svodollars || 0) < bet) {
         return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${bet} 💵, у тебя ${user?.svodollars || 0}`, show_alert: true });
       }
+      await bot.answerCallbackQuery(queryId);
 
       const gameId = db.createDuelGame(userId, opponentId, bet);
       if (!gameId) return bot.sendMessage(chatId, "❌ Не удалось создать дуэль.");
@@ -1364,12 +1395,12 @@ bot.on("callback_query", async (query) => {
           { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML",
             reply_markup: { inline_keyboard: [[{ text: "❌ Отменить", callback_data: `duel_cancel_${gameId}` }]] } }
         );
+        return;
       }
     }
 
     // Duel rematch
     if (data.startsWith("duel_rematch_")) {
-      await bot.answerCallbackQuery(queryId);
       const parts = data.split("_"); // duel_rematch_<opponentId>_<bet>
       const opponentId = parseInt(parts[2]);
       const bet = parseInt(parts[3]);
@@ -1377,6 +1408,7 @@ bot.on("callback_query", async (query) => {
       if ((user?.svodollars || 0) < bet) {
         return bot.answerCallbackQuery(queryId, { text: `❌ Недостаточно SVOлларов!`, show_alert: true });
       }
+      await bot.answerCallbackQuery(queryId);
       const gameId = db.createDuelGame(userId, opponentId, bet);
       const initiatorName = from.username ? `@${from.username}` : from.first_name;
       try {
@@ -1500,7 +1532,6 @@ bot.on("callback_query", async (query) => {
       const roundResult = db.resolveDuelRound(gameId);
       if (!roundResult) return;
 
-      const freshGame = db.getDuelGame(gameId);
       const initiatorUser = db.getUser(game.initiator_id);
       const opponentUser  = db.getUser(game.opponent_id);
       const iName = initiatorUser?.username ? `@${initiatorUser.username}` : "Игрок 1";

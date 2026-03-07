@@ -280,6 +280,10 @@ function finishDiceGame(gameId) {
   }
   return { ...game, isDraw, winnerId: isDraw ? null : (iWin ? game.initiator_id : game.opponent_id) };
 }
+function getOpenDiceGames() {
+  return getAll("SELECT * FROM dice_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+
 function cancelDiceGame(gameId) {
   const game = getDiceGame(gameId);
   if (!game) return;
@@ -434,6 +438,10 @@ function resolveDuelRound(gameId) {
     iDmg, oDmg, newIHp, newOHp, finished, isDraw, winnerId, round: game.round,
   };
 }
+function getOpenDuelGames() {
+  return getAll("SELECT * FROM duel_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+
 function cancelDuelGame(gameId) {
   const game = getDuelGame(gameId);
   if (!game) return;
@@ -454,10 +462,10 @@ module.exports = {
   createSession, getActiveSession, updateSession, setSessionTimerMsg, finishSession,
   getLeaderboard,
   buyRainbowNick, buyTimerBonus, useTimerBonus, throwPoop, burnCoins, getPoopCount,
-  createDiceGame, getDiceGame, getDiceGameByUser, acceptDiceGame, setDiceRoll,
+  createDiceGame, getDiceGame, getDiceGameByUser, getOpenDiceGames, acceptDiceGame, setDiceRoll,
   finishDiceGame, cancelDiceGame, setDiceMsgId,
   createMineGame, getMineGame, getActiveMineGame, revealMineCell, cashoutMine, setMineMsgId,
   MINE_TOTAL, MINE_SAFE,
-  createDuelGame, getDuelGame, getDuelGameByUser, acceptDuelGame, setDuelAction,
+  createDuelGame, getDuelGame, getDuelGameByUser, getOpenDuelGames, acceptDuelGame, setDuelAction,
   resolveDuelRound, cancelDuelGame, setDuelMsgId,
 };
