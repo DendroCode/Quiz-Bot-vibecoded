@@ -82,6 +82,7 @@ function mainMenuKeyboard() {
         { text: "🎲 Игры",            callback_data: "menu_games" },
         { text: "🛒 Магазин",         callback_data: "menu_shop" },
       ],
+      [{ text: "🎁 Ежедневный бонус", callback_data: "menu_daily" }],
       [{ text: "ℹ️ Правила",          callback_data: "menu_rules" }],
     ],
   };
@@ -702,6 +703,36 @@ bot.on("callback_query", async (query) => {
           parse_mode: "HTML",
         }
       );
+    }
+
+    if (data === "menu_daily") {
+      const result = db.claimDailyBonus(userId);
+      if (result.ok) {
+        const user = db.getUser(userId);
+        await bot.answerCallbackQuery(queryId, { text: "🎁 +100 SVOлларов получено!", show_alert: true });
+        return bot.editMessageText(
+          `🎁 <b>Ежедневный бонус получен!</b>\n\n` +
+          `+<b>100 💵 SVOлларов</b> начислено!\n\n` +
+          `Твой баланс: <b>${user.svodollars} 💵</b>\n\n` +
+          `Следующий бонус через 24 часа ⏰`,
+          {
+            chat_id: chatId, message_id: message.message_id,
+            reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "menu_main" }]] },
+            parse_mode: "HTML",
+          }
+        );
+      } else {
+        await bot.answerCallbackQuery(queryId, { text: `⏳ Следующий бонус через ${result.hoursLeft} ч.`, show_alert: true });
+        return bot.editMessageText(
+          `⏳ <b>Ежедневный бонус уже получен!</b>\n\n` +
+          `Следующий бонус будет доступен через <b>${result.hoursLeft} ч.</b>`,
+          {
+            chat_id: chatId, message_id: message.message_id,
+            reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "menu_main" }]] },
+            parse_mode: "HTML",
+          }
+        );
+      }
     }
 
     if (data === "menu_profile") {

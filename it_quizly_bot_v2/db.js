@@ -31,7 +31,8 @@ function initDB() {
       mine_earned INTEGER DEFAULT 0,
       duel_wins INTEGER DEFAULT 0,
       duel_losses INTEGER DEFAULT 0,
-      duel_earned INTEGER DEFAULT 0
+      duel_earned INTEGER DEFAULT 0,
+      last_daily TEXT DEFAULT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +110,7 @@ function initDB() {
     "ALTER TABLE users ADD COLUMN duel_wins INTEGER DEFAULT 0",
     "ALTER TABLE users ADD COLUMN duel_losses INTEGER DEFAULT 0",
     "ALTER TABLE users ADD COLUMN duel_earned INTEGER DEFAULT 0",
-    "ALTER TABLE sessions ADD COLUMN timer_message_id INTEGER DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN last_daily TEXT DEFAULT NULL",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch (_) {}
@@ -128,8 +129,31 @@ function run(sql, ...params) {
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 function ensureUser(telegramId, username) {
-  run("INSERT OR IGNORE INTO users (telegram_id, username) VALUES (?, ?)", telegramId, username || "Аноним");
+  const existing = getUser(telegramId);
+  if (!existing) {
+    run("INSERT OR IGNORE INTO users (telegram_id, username, svodollars) VALUES (?, ?, 250)", telegramId, username || "Аноним");
+  }
   return getUser(telegramId);
+}
+
+// Returns { ok, hoursLeft } — ok=true if bonus was claimed, hoursLeft if not yet
+function claimDailyBonus(telegramId) {
+  const user = getUser(telegramId);
+  if (!user) return { ok: false, hoursLeft: 0 };
+
+  if (user.last_daily) {
+    const last = new Date(user.last_daily);
+    const now = new Date();
+    const diffMs = now - last;
+    const diffHours = diffMs / (1000 * 60 * 60);
+    if (diffHours < 24) {
+      const hoursLeft = Math.ceil(24 - diffHours);
+      return { ok: false, hoursLeft };
+    }
+  }
+
+  run("UPDATE users SET svodollars = svodollars + 100, last_daily = datetime('now') WHERE telegram_id = ?", telegramId);
+  return { ok: true };
 }
 function getUser(telegramId) {
   return getOne("SELECT * FROM users WHERE telegram_id = ?", telegramId);
@@ -458,7 +482,7 @@ function setDuelMsgId(gameId, field, msgId) {
 
 module.exports = {
   initDB,
-  ensureUser, getUser, getAllUsers, addCoins, spendCoins, adminAddCoins, adminSetScore,
+  ensureUser, getUser, getAllUsers, addCoins, spendCoins, adminAddCoins, adminSetScore, claimDailyBonus,
   createSession, getActiveSession, updateSession, setSessionTimerMsg, finishSession,
   getLeaderboard,
   buyRainbowNick, buyTimerBonus, useTimerBonus, throwPoop, burnCoins, getPoopCount,
