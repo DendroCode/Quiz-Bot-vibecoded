@@ -110,6 +110,49 @@ function initDB() {
       loser_id INTEGER,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    -- Sniper game (guess the number)
+    CREATE TABLE IF NOT EXISTS sniper_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guesser_id INTEGER NOT NULL,
+      hider_id INTEGER NOT NULL,
+      bet INTEGER NOT NULL,
+      secret INTEGER NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER NOT NULL,
+      last_guess INTEGER,
+      status TEXT DEFAULT 'active',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Safe cracker (Mastermind with digits)
+    CREATE TABLE IF NOT EXISTS safe_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      initiator_id INTEGER NOT NULL,
+      opponent_id INTEGER,
+      bet INTEGER NOT NULL,
+      code TEXT NOT NULL,
+      initiator_guesses TEXT DEFAULT '[]',
+      opponent_guesses TEXT DEFAULT '[]',
+      initiator_solved INTEGER DEFAULT 0,
+      opponent_solved INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Detective game
+    CREATE TABLE IF NOT EXISTS detective_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mafia_id INTEGER NOT NULL,
+      detective_id INTEGER,
+      bet INTEGER NOT NULL,
+      truth_index INTEGER NOT NULL,
+      alibis TEXT NOT NULL,
+      questions_asked INTEGER DEFAULT 0,
+      answers TEXT DEFAULT '[]',
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   const migrations = [
@@ -479,6 +522,200 @@ function cancelRouletteGame(gameId) {
   run("UPDATE roulette_games SET status='cancelled' WHERE id=?", gameId);
 }
 
+// ── SNIPER ────────────────────────────────────────────────────────────────────
+function createSniperGame(hiderId, guesserId, bet, secret, maxAttempts) {
+  if (!spendCoins(hiderId, bet)) return null;
+  if (!spendCoins(guesserId, bet)) { addCoins(hiderId, bet); return null; }
+  const r = run(
+    "INSERT INTO sniper_games (guesser_id, hider_id, bet, secret, max_attempts, status) VALUES (?,?,?,?,?,'active')",
+    guesserId, hiderId, bet, secret, maxAttempts
+  );
+  return r.lastInsertRowid;
+}
+function getSniperGame(id) { return getOne("SELECT * FROM sniper_games WHERE id=?", id); }
+function getSniperGameByUser(userId) {
+  return getOne("SELECT * FROM sniper_games WHERE (guesser_id=? OR hider_id=?) AND status='active' ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function makeGuess(gameId, guess) {
+  const game = getSniperGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const attempts = game.attempts + 1;
+  const hit = guess === game.secret;
+  const outOfAmmo = attempts >= game.max_attempts && !hit;
+  const status = (hit || outOfAmmo) ? "finished" : "active";
+  run("UPDATE sniper_games SET attempts=?, last_guess=?, status=? WHERE id=?", attempts, guess, status, gameId);
+  if (hit) {
+    addCoins(game.guesser_id, game.bet * 2);
+    run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, game.guesser_id);
+    run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", game.hider_id);
+  } else if (outOfAmmo) {
+    addCoins(game.hider_id, game.bet * 2);
+    run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, game.hider_id);
+    run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", game.guesser_id);
+  }
+  const hint = hit ? "hit" : guess < game.secret ? "higher" : "lower";
+  return { hit, outOfAmmo, attempts, hint, secret: (hit || outOfAmmo) ? game.secret : null };
+}
+
+// ── SAFE CRACKER ─────────────────────────────────────────────────────────────
+function createSafeGame(initiatorId, opponentId, bet) {
+  if (!spendCoins(initiatorId, bet)) return null;
+  const code = String(Math.floor(Math.random() * 9000) + 1000); // 4-digit, no leading zero
+  const r = run(
+    "INSERT INTO safe_games (initiator_id, opponent_id, bet, code, status) VALUES (?,?,?,?,'pending')",
+    initiatorId, opponentId ?? null, bet, code
+  );
+  return r.lastInsertRowid;
+}
+function getSafeGame(id) { return getOne("SELECT * FROM safe_games WHERE id=?", id); }
+function getSafeGameByUser(userId) {
+  return getOne("SELECT * FROM safe_games WHERE (initiator_id=? OR opponent_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenSafeGames() {
+  return getAll("SELECT * FROM safe_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptSafeGame(gameId, opponentId) {
+  const game = getSafeGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(opponentId, game.bet)) return false;
+  run("UPDATE safe_games SET opponent_id=?, status='active' WHERE id=?", opponentId, gameId);
+  return true;
+}
+function cancelSafeGame(gameId) {
+  const game = getSafeGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.initiator_id, game.bet);
+  if (game.status === "active") { addCoins(game.initiator_id, game.bet); if (game.opponent_id) addCoins(game.opponent_id, game.bet); }
+  run("UPDATE safe_games SET status='cancelled' WHERE id=?", gameId);
+}
+function safeGuess(gameId, userId, guess) {
+  const game = getSafeGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const isInitiator = game.initiator_id === userId;
+  const field = isInitiator ? "initiator_guesses" : "opponent_guesses";
+  const solvedField = isInitiator ? "initiator_solved" : "opponent_solved";
+  const guesses = JSON.parse(game[field]);
+  if (guesses.length >= 8) return { tooMany: true };
+
+  // Score: exact = right digit right place, partial = right digit wrong place
+  const code = game.code;
+  let exact = 0, partial = 0;
+  const codeArr = code.split(""), guessArr = guess.split("");
+  const usedCode = [false,false,false,false], usedGuess = [false,false,false,false];
+  for (let i = 0; i < 4; i++) { if (guessArr[i] === codeArr[i]) { exact++; usedCode[i] = usedGuess[i] = true; } }
+  for (let i = 0; i < 4; i++) {
+    if (usedGuess[i]) continue;
+    for (let j = 0; j < 4; j++) { if (!usedCode[j] && guessArr[i] === codeArr[j]) { partial++; usedCode[j] = usedGuess[i] = true; break; } }
+  }
+
+  guesses.push({ guess, exact, partial });
+  const solved = exact === 4;
+  run(`UPDATE safe_games SET ${field}=?, ${solvedField}=? WHERE id=?`, JSON.stringify(guesses), solved ? 1 : 0, gameId);
+
+  // Check if both solved or one ran out
+  const updatedGame = getSafeGame(gameId);
+  const iSolved = updatedGame.initiator_solved, oSolved = updatedGame.opponent_solved;
+  const iGuesses = JSON.parse(updatedGame.initiator_guesses), oGuesses = JSON.parse(updatedGame.opponent_guesses);
+  const iDone = iSolved || iGuesses.length >= 8, oDone = oSolved || oGuesses.length >= 8;
+
+  if (iDone && oDone) {
+    run("UPDATE safe_games SET status='finished' WHERE id=?", gameId);
+    let winnerId = null;
+    if (iSolved && oSolved) {
+      // Both solved — fewer guesses wins
+      winnerId = iGuesses.length <= oGuesses.length ? game.initiator_id : game.opponent_id;
+    } else if (iSolved) { winnerId = game.initiator_id; }
+    else if (oSolved)   { winnerId = game.opponent_id; }
+    if (winnerId) {
+      addCoins(winnerId, game.bet * 2);
+      const loserId = winnerId === game.initiator_id ? game.opponent_id : game.initiator_id;
+      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    } else {
+      addCoins(game.initiator_id, game.bet); addCoins(game.opponent_id, game.bet);
+    }
+    return { exact, partial, solved, finished: true, winnerId, code: game.code, guessCount: guesses.length };
+  }
+  return { exact, partial, solved, finished: false, guessCount: guesses.length };
+}
+
+// ── DETECTIVE ─────────────────────────────────────────────────────────────────
+const DETECTIVE_ALIBIS = [
+  ["Был дома весь вечер", "Ходил в кино", "Сидел в баре с друзьями"],
+  ["Работал в офисе допоздна", "Был на вечеринке", "Ездил к родителям"],
+  ["Смотрел футбол в пабе", "Гулял в парке", "Был на тренировке"],
+  ["Помогал другу с переездом", "Ужинал в ресторане", "Читал дома"],
+  ["Был в командировке", "Ремонтировал машину", "Встречался с клиентом"],
+];
+const DETECTIVE_QUESTIONS = [
+  ["Был ли ты один?", "Есть ли свидетели?", "Можешь ли подтвердить документально?"],
+  ["Во сколько вернулся домой?", "С кем был?", "Есть чеки или записи?"],
+  ["Кто-то видел тебя?", "Есть ли алиби от третьих лиц?", "Что делал после?"],
+];
+function createDetectiveGame(mafiaId, detectiveId, bet) {
+  if (!spendCoins(mafiaId, bet)) return null;
+  const alibiSet = DETECTIVE_ALIBIS[Math.floor(Math.random() * DETECTIVE_ALIBIS.length)];
+  const truthIndex = Math.floor(Math.random() * 3);
+  const questionSet = DETECTIVE_QUESTIONS[Math.floor(Math.random() * DETECTIVE_QUESTIONS.length)];
+  const r = run(
+    "INSERT INTO detective_games (mafia_id, detective_id, bet, truth_index, alibis, status) VALUES (?,?,?,?,?,'pending')",
+    mafiaId, detectiveId ?? null, bet, truthIndex, JSON.stringify({ alibis: alibiSet, questions: questionSet })
+  );
+  return r.lastInsertRowid;
+}
+function getDetectiveGame(id) { return getOne("SELECT * FROM detective_games WHERE id=?", id); }
+function getDetectiveGameByUser(userId) {
+  return getOne("SELECT * FROM detective_games WHERE (mafia_id=? OR detective_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenDetectiveGames() {
+  return getAll("SELECT * FROM detective_games WHERE status='pending' AND detective_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptDetectiveGame(gameId, detectiveId) {
+  const game = getDetectiveGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(detectiveId, game.bet)) return false;
+  run("UPDATE detective_games SET detective_id=?, status='active' WHERE id=?", detectiveId, gameId);
+  return true;
+}
+function cancelDetectiveGame(gameId) {
+  const game = getDetectiveGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.mafia_id, game.bet);
+  if (game.status === "active") { addCoins(game.mafia_id, game.bet); if (game.detective_id) addCoins(game.detective_id, game.bet); }
+  run("UPDATE detective_games SET status='cancelled' WHERE id=?", gameId);
+}
+function detectiveAnswer(gameId, questionIndex) {
+  const game = getDetectiveGame(gameId);
+  if (!game) return null;
+  const data = JSON.parse(game.alibis);
+  const answers = JSON.parse(game.answers);
+  // Mafia answers truthfully only for truth alibi, lies for others
+  const isTruth = questionIndex < 3; // questions are always about the chosen alibi set
+  answers.push({ q: data.questions[game.questions_asked], a: `[ответ мафии на вопрос ${game.questions_asked + 1}]` });
+  run("UPDATE detective_games SET questions_asked=questions_asked+1, answers=? WHERE id=?", JSON.stringify(answers), gameId);
+  return getSafeGame(gameId); // return updated
+}
+function detectiveAccuse(gameId, accusedIndex) {
+  const game = getDetectiveGame(gameId);
+  if (!game) return null;
+  const correct = accusedIndex === game.truth_index;
+  run("UPDATE detective_games SET status='finished' WHERE id=?", gameId);
+  if (correct) {
+    addCoins(game.detective_id, game.bet * 2);
+    run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, game.detective_id);
+    run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", game.mafia_id);
+  } else {
+    addCoins(game.mafia_id, game.bet * 2);
+    run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, game.mafia_id);
+    run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", game.detective_id);
+  }
+  return { correct, truthIndex: game.truth_index, data: JSON.parse(game.alibis) };
+}
+
+function detectiveAnswerQuestion(gameId, questionsAsked, answersJson) {
+  run("UPDATE detective_games SET questions_asked=?, answers=? WHERE id=?", questionsAsked, answersJson, gameId);
+}
+
 // Keep old duel stubs so exports don't break — redirect to roulette
 function createDuelGame(i, o, b)   { return createRouletteGame(i, o, b); }
 function getDuelGame(id)            { return getRouletteGame(id); }
@@ -501,6 +738,8 @@ module.exports = {
   createMineGame, getMineGame, getActiveMineGame, revealMineCell, cashoutMine, setMineMsgId,
   MINE_TOTAL, MINE_SAFE,
   createDuelGame, getDuelGame, getDuelGameByUser, getOpenDuelGames, acceptDuelGame,
-  cancelDuelGame, setDuelMsgId, pullTrigger,
-  cancelDuelGame, setDuelMsgId, pullTrigger,
+  cancelDuelGame, setDuelMsgId, pullTrigger, getRouletteGame,
+  createSniperGame, getSniperGame, getSniperGameByUser, makeGuess,
+  createSafeGame, getSafeGame, getSafeGameByUser, getOpenSafeGames, acceptSafeGame, cancelSafeGame, safeGuess,
+  createDetectiveGame, getDetectiveGame, getDetectiveGameByUser, getOpenDetectiveGames, acceptDetectiveGame, cancelDetectiveGame, detectiveAccuse, detectiveAnswer, detectiveAnswerQuestion,
 };
