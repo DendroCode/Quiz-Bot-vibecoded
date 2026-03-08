@@ -153,6 +153,63 @@ function initDB() {
       status TEXT DEFAULT 'pending',
       created_at TEXT DEFAULT (datetime('now'))
     );
+    -- Darts duel
+    CREATE TABLE IF NOT EXISTS darts_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      initiator_id INTEGER NOT NULL,
+      opponent_id INTEGER,
+      bet INTEGER NOT NULL,
+      initiator_throws TEXT DEFAULT '[]',
+      opponent_throws TEXT DEFAULT '[]',
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Thimbles (напёрстки)
+    CREATE TABLE IF NOT EXISTS thimbles_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      initiator_id INTEGER NOT NULL,
+      opponent_id INTEGER,
+      bet INTEGER NOT NULL,
+      round INTEGER DEFAULT 1,
+      initiator_score INTEGER DEFAULT 0,
+      opponent_score INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Dungeon coop
+    CREATE TABLE IF NOT EXISTS dungeon_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      player1_id INTEGER NOT NULL,
+      player2_id INTEGER,
+      bet INTEGER NOT NULL,
+      floor INTEGER DEFAULT 1,
+      player1_hp INTEGER DEFAULT 10,
+      player2_hp INTEGER DEFAULT 10,
+      player1_gold INTEGER DEFAULT 0,
+      player2_gold INTEGER DEFAULT 0,
+      player1_action TEXT,
+      player2_action TEXT,
+      event TEXT,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Space survival
+    CREATE TABLE IF NOT EXISTS space_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      player1_id INTEGER NOT NULL,
+      player2_id INTEGER,
+      bet INTEGER NOT NULL,
+      round INTEGER DEFAULT 1,
+      player1_hp INTEGER DEFAULT 5,
+      player2_hp INTEGER DEFAULT 5,
+      player1_action TEXT,
+      player2_action TEXT,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   const migrations = [
@@ -716,6 +773,297 @@ function detectiveAnswerQuestion(gameId, questionsAsked, answersJson) {
   run("UPDATE detective_games SET questions_asked=?, answers=? WHERE id=?", questionsAsked, answersJson, gameId);
 }
 
+// ── DARTS ─────────────────────────────────────────────────────────────────────
+function createDartsGame(initiatorId, opponentId, bet) {
+  if (!spendCoins(initiatorId, bet)) return null;
+  const r = run("INSERT INTO darts_games (initiator_id, opponent_id, bet, status) VALUES (?,?,?,'pending')", initiatorId, opponentId ?? null, bet);
+  return r.lastInsertRowid;
+}
+function getDartsGame(id) { return getOne("SELECT * FROM darts_games WHERE id=?", id); }
+function getDartsGameByUser(userId) {
+  return getOne("SELECT * FROM darts_games WHERE (initiator_id=? OR opponent_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenDartsGames() {
+  return getAll("SELECT * FROM darts_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptDartsGame(gameId, opponentId) {
+  const game = getDartsGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(opponentId, game.bet)) return false;
+  run("UPDATE darts_games SET opponent_id=?, status='active' WHERE id=?", opponentId, gameId);
+  return true;
+}
+function cancelDartsGame(gameId) {
+  const game = getDartsGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.initiator_id, game.bet);
+  if (game.status === "active") { addCoins(game.initiator_id, game.bet); if (game.opponent_id) addCoins(game.opponent_id, game.bet); }
+  run("UPDATE darts_games SET status='cancelled' WHERE id=?", gameId);
+}
+function recordDartsThrow(gameId, userId, value) {
+  const game = getDartsGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const isInit = game.initiator_id === userId;
+  const field = isInit ? "initiator_throws" : "opponent_throws";
+  const throws = JSON.parse(game[field]);
+  throws.push(value);
+  run(`UPDATE darts_games SET ${field}=? WHERE id=?`, JSON.stringify(throws), gameId);
+  const updated = getDartsGame(gameId);
+  const iThrows = JSON.parse(updated.initiator_throws);
+  const oThrows = JSON.parse(updated.opponent_throws);
+  if (iThrows.length >= 3 && oThrows.length >= 3) {
+    const iTotal = iThrows.reduce((a,b) => a+b, 0);
+    const oTotal = oThrows.reduce((a,b) => a+b, 0);
+    run("UPDATE darts_games SET status='finished' WHERE id=?", gameId);
+    let winnerId = null;
+    if (iTotal !== oTotal) {
+      winnerId = iTotal > oTotal ? game.initiator_id : game.opponent_id;
+      const loserId = winnerId === game.initiator_id ? game.opponent_id : game.initiator_id;
+      addCoins(winnerId, game.bet * 2);
+      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    } else {
+      addCoins(game.initiator_id, game.bet); addCoins(game.opponent_id, game.bet);
+    }
+    return { finished: true, iThrows, oThrows, iTotal, oTotal, winnerId };
+  }
+  return { finished: false, throws, throwCount: throws.length };
+}
+
+// ── THIMBLES (напёрстки) ──────────────────────────────────────────────────────
+function createThimblesGame(initiatorId, opponentId, bet) {
+  if (!spendCoins(initiatorId, bet)) return null;
+  const r = run("INSERT INTO thimbles_games (initiator_id, opponent_id, bet, status) VALUES (?,?,?,'pending')", initiatorId, opponentId ?? null, bet);
+  return r.lastInsertRowid;
+}
+function getThimblesGame(id) { return getOne("SELECT * FROM thimbles_games WHERE id=?", id); }
+function getThimblesGameByUser(userId) {
+  return getOne("SELECT * FROM thimbles_games WHERE (initiator_id=? OR opponent_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenThimblesGames() {
+  return getAll("SELECT * FROM thimbles_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptThimblesGame(gameId, opponentId) {
+  const game = getThimblesGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(opponentId, game.bet)) return false;
+  run("UPDATE thimbles_games SET opponent_id=?, status='active' WHERE id=?", opponentId, gameId);
+  return true;
+}
+function cancelThimblesGame(gameId) {
+  const game = getThimblesGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.initiator_id, game.bet);
+  if (game.status === "active") { addCoins(game.initiator_id, game.bet); if (game.opponent_id) addCoins(game.opponent_id, game.bet); }
+  run("UPDATE thimbles_games SET status='cancelled' WHERE id=?", gameId);
+}
+// Returns { correct, winnerId?, finished, round, iScore, oScore }
+function thimblesGuess(gameId, userId, guess) {
+  const game = getThimblesGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const correct = guess === "B"; // B = correct thimble, always stored as correct answer
+  const isInit = game.initiator_id === userId;
+  const iScore = game.initiator_score + (isInit && correct ? 1 : 0);
+  const oScore = game.opponent_score + (!isInit && correct ? 1 : 0);
+  const nextRound = game.round + 1;
+  const finished = nextRound > 5;
+  const status = finished ? "finished" : "active";
+  run("UPDATE thimbles_games SET round=?, initiator_score=?, opponent_score=?, status=? WHERE id=?", nextRound, iScore, oScore, status, gameId);
+  if (finished) {
+    let winnerId = null;
+    if (iScore !== oScore) {
+      winnerId = iScore > oScore ? game.initiator_id : game.opponent_id;
+      const loserId = winnerId === game.initiator_id ? game.opponent_id : game.initiator_id;
+      addCoins(winnerId, game.bet * 2);
+      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    } else {
+      addCoins(game.initiator_id, game.bet); addCoins(game.opponent_id, game.bet);
+    }
+    return { correct, finished: true, round: game.round, iScore, oScore, winnerId };
+  }
+  return { correct, finished: false, round: game.round, iScore, oScore };
+}
+
+// ── DUNGEON ───────────────────────────────────────────────────────────────────
+const DUNGEON_EVENTS = [
+  { type: "monster", name: "Гоблин",      desc: "Маленький, но злой!",    dmg: 2, gold: 3 },
+  { type: "monster", name: "Скелет",      desc: "Гремит костями...",       dmg: 3, gold: 4 },
+  { type: "monster", name: "Тролль",      desc: "Огромный и тупой.",       dmg: 4, gold: 6 },
+  { type: "monster", name: "Дракон",      desc: "О нет. О нееет.",         dmg: 6, gold: 10 },
+  { type: "treasure",name: "Сундук",      desc: "Заперт, но поддаётся!",   dmg: 0, gold: 5 },
+  { type: "trap",    name: "Ловушка",     desc: "Щёлк! Стрела в ногу.",    dmg: 3, gold: 0 },
+  { type: "heal",    name: "Родник",      desc: "Чистая вода, +3 HP.",      dmg: -3, gold: 0 },
+  { type: "shop",    name: "Торговец",    desc: "Продаёт зелья за 2 золота, +4 HP.", dmg: 0, gold: -2, healShop: 4 },
+];
+function createDungeonGame(p1Id, p2Id, bet) {
+  if (!spendCoins(p1Id, bet)) return null;
+  const r = run("INSERT INTO dungeon_games (player1_id, player2_id, bet, status) VALUES (?,?,?,'pending')", p1Id, p2Id ?? null, bet);
+  return r.lastInsertRowid;
+}
+function getDungeonGame(id) { return getOne("SELECT * FROM dungeon_games WHERE id=?", id); }
+function getDungeonGameByUser(userId) {
+  return getOne("SELECT * FROM dungeon_games WHERE (player1_id=? OR player2_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenDungeonGames() {
+  return getAll("SELECT * FROM dungeon_games WHERE status='pending' AND player2_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptDungeonGame(gameId, p2Id) {
+  const game = getDungeonGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(p2Id, game.bet)) return false;
+  const event = DUNGEON_EVENTS[Math.floor(Math.random() * DUNGEON_EVENTS.length)];
+  run("UPDATE dungeon_games SET player2_id=?, status='active', event=? WHERE id=?", p2Id, JSON.stringify(event), gameId);
+  return true;
+}
+function cancelDungeonGame(gameId) {
+  const game = getDungeonGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.player1_id, game.bet);
+  if (game.status === "active") { addCoins(game.player1_id, game.bet); if (game.player2_id) addCoins(game.player2_id, game.bet); }
+  run("UPDATE dungeon_games SET status='cancelled' WHERE id=?", gameId);
+}
+function dungeonAct(gameId, userId, action) {
+  const game = getDungeonGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const isP1 = game.player1_id === userId;
+  run(`UPDATE dungeon_games SET ${isP1 ? "player1_action" : "player2_action"}=? WHERE id=?`, action, gameId);
+  const updated = getDungeonGame(gameId);
+  if (!updated.player1_action || !updated.player2_action) return { waiting: true };
+
+  const event = JSON.parse(updated.event);
+  let p1hp = updated.player1_hp, p2hp = updated.player2_hp;
+  let p1gold = updated.player1_gold, p2gold = updated.player2_gold;
+
+  function applyAction(action, isP1, event) {
+    let hp = isP1 ? p1hp : p2hp, gold = isP1 ? p1gold : p2gold;
+    if (event.type === "monster") {
+      if (action === "fight") { gold += event.gold; hp -= Math.max(0, event.dmg - 1); }
+      else if (action === "run") { hp -= 1; } // small scratch running away
+      else if (action === "trick") { const success = Math.random() > 0.4; if (success) gold += event.gold; else hp -= event.dmg; }
+    } else if (event.type === "treasure") {
+      gold += event.gold;
+    } else if (event.type === "trap") {
+      if (action === "careful") { hp -= 1; } else { hp -= event.dmg; }
+    } else if (event.type === "heal") {
+      hp = Math.min(10, hp + 3);
+    } else if (event.type === "shop") {
+      if (action === "buy" && gold >= 2) { hp = Math.min(10, hp + 4); gold -= 2; }
+    }
+    if (isP1) { p1hp = hp; p1gold = gold; } else { p2hp = hp; p2gold = gold; }
+  }
+
+  applyAction(updated.player1_action, true, event);
+  applyAction(updated.player2_action, false, event);
+
+  const nextFloor = updated.floor + 1;
+  const maxFloor = 5;
+  const p1Dead = p1hp <= 0, p2Dead = p2hp <= 0;
+  const finished = nextFloor > maxFloor || (p1Dead && p2Dead) || p1Dead || p2Dead;
+
+  const nextEvent = finished ? null : JSON.stringify(DUNGEON_EVENTS[Math.floor(Math.random() * DUNGEON_EVENTS.length)]);
+  run("UPDATE dungeon_games SET player1_hp=?, player2_hp=?, player1_gold=?, player2_gold=?, floor=?, player1_action=NULL, player2_action=NULL, event=?, status=? WHERE id=?",
+    p1hp, p2hp, p1gold, p2gold, nextFloor, nextEvent, finished ? "finished" : "active", gameId);
+
+  if (finished) {
+    // Winner = most gold among survivors, or just more gold if both alive
+    const p1alive = p1hp > 0, p2alive = p2hp > 0;
+    let winnerId = null;
+    if (p1alive && !p2alive) winnerId = game.player1_id;
+    else if (p2alive && !p1alive) winnerId = game.player2_id;
+    else if (p1gold !== p2gold) winnerId = p1gold > p2gold ? game.player1_id : game.player2_id;
+    if (winnerId) {
+      const loserId = winnerId === game.player1_id ? game.player2_id : game.player1_id;
+      addCoins(winnerId, game.bet * 2);
+      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    } else {
+      addCoins(game.player1_id, game.bet); addCoins(game.player2_id, game.bet);
+    }
+    return { waiting: false, finished: true, event, p1hp, p2hp, p1gold, p2gold, winnerId, p1action: updated.player1_action, p2action: updated.player2_action };
+  }
+  return { waiting: false, finished: false, event, nextEvent: JSON.parse(nextEvent), floor: updated.floor, p1hp, p2hp, p1gold, p2gold, p1action: updated.player1_action, p2action: updated.player2_action };
+}
+
+// ── SPACE SURVIVAL ────────────────────────────────────────────────────────────
+const SPACE_EVENTS = [
+  { id: "meteor",  desc: "☄️ Метеоритный дождь!",        actions: { dodge: "Уклониться", shield: "Поставить щит",  ignore: "Игнорировать" } },
+  { id: "alien",   desc: "👾 Инопланетный корабль!",      actions: { fight: "Открыть огонь",  hide: "Спрятаться",    run: "Уйти на варп" } },
+  { id: "black",   desc: "🕳 Гравитационная аномалия!",   actions: { boost: "Форсировать двигатели", drift: "Дрейфовать", scan: "Просканировать" } },
+  { id: "storm",   desc: "⚡ Магнитная буря!",            actions: { shield: "Включить экраны", fly: "Облететь", charge: "Зарядить системы" } },
+  { id: "debris",  desc: "🛸 Поле обломков!",             actions: { slow: "Замедлиться", fast: "Проскочить на скорости", scan: "Найти путь" } },
+];
+// outcomes[eventId][action] = hpChange (-2..+1)
+const SPACE_OUTCOMES = {
+  meteor: { dodge: 0, shield: -1, ignore: -2 },
+  alien:  { fight: -1, hide: 0, run: -2 },
+  black:  { boost: 0, drift: -1, scan: 1 },
+  storm:  { shield: 0, fly: -1, charge: -2 },
+  debris: { slow: 0, fast: -2, scan: 1 },
+};
+function createSpaceGame(p1Id, p2Id, bet) {
+  if (!spendCoins(p1Id, bet)) return null;
+  const r = run("INSERT INTO space_games (player1_id, player2_id, bet, status) VALUES (?,?,?,'pending')", p1Id, p2Id ?? null, bet);
+  return r.lastInsertRowid;
+}
+function getSpaceGame(id) { return getOne("SELECT * FROM space_games WHERE id=?", id); }
+function getSpaceGameByUser(userId) {
+  return getOne("SELECT * FROM space_games WHERE (player1_id=? OR player2_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1", userId, userId);
+}
+function getOpenSpaceGames() {
+  return getAll("SELECT * FROM space_games WHERE status='pending' AND player2_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+function acceptSpaceGame(gameId, p2Id) {
+  const game = getSpaceGame(gameId);
+  if (!game) return false;
+  if (!spendCoins(p2Id, game.bet)) return false;
+  run("UPDATE space_games SET player2_id=?, status='active' WHERE id=?", p2Id, gameId);
+  return true;
+}
+function cancelSpaceGame(gameId) {
+  const game = getSpaceGame(gameId);
+  if (!game) return;
+  if (game.status === "pending") addCoins(game.player1_id, game.bet);
+  if (game.status === "active") { addCoins(game.player1_id, game.bet); if (game.player2_id) addCoins(game.player2_id, game.bet); }
+  run("UPDATE space_games SET status='cancelled' WHERE id=?", gameId);
+}
+function spaceAct(gameId, userId, action) {
+  const game = getSpaceGame(gameId);
+  if (!game || game.status !== "active") return null;
+  const isP1 = game.player1_id === userId;
+  run(`UPDATE space_games SET ${isP1 ? "player1_action" : "player2_action"}=? WHERE id=?`, action, gameId);
+  const updated = getSpaceGame(gameId);
+  if (!updated.player1_action || !updated.player2_action) return { waiting: true };
+
+  const eventData = SPACE_EVENTS[updated.round % SPACE_EVENTS.length];
+  const outcomes = SPACE_OUTCOMES[eventData.id];
+  const p1delta = outcomes[updated.player1_action] ?? -1;
+  const p2delta = outcomes[updated.player2_action] ?? -1;
+  const p1hp = Math.max(0, updated.player1_hp + p1delta);
+  const p2hp = Math.max(0, updated.player2_hp + p2delta);
+  const nextRound = updated.round + 1;
+  const finished = nextRound > 5 || p1hp <= 0 || p2hp <= 0;
+  run("UPDATE space_games SET player1_hp=?, player2_hp=?, round=?, player1_action=NULL, player2_action=NULL, status=? WHERE id=?",
+    p1hp, p2hp, nextRound, finished ? "finished" : "active", gameId);
+
+  if (finished) {
+    let winnerId = null;
+    if (p1hp > p2hp) winnerId = game.player1_id;
+    else if (p2hp > p1hp) winnerId = game.player2_id;
+    if (winnerId) {
+      const loserId = winnerId === game.player1_id ? game.player2_id : game.player1_id;
+      addCoins(winnerId, game.bet * 2);
+      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    } else {
+      addCoins(game.player1_id, game.bet); addCoins(game.player2_id, game.bet);
+    }
+    return { waiting: false, finished: true, event: eventData, p1hp, p2hp, p1delta, p2delta, winnerId, p1action: updated.player1_action, p2action: updated.player2_action };
+  }
+  const nextEvent = SPACE_EVENTS[nextRound % SPACE_EVENTS.length];
+  return { waiting: false, finished: false, event: eventData, nextEvent, round: updated.round, p1hp, p2hp, p1delta, p2delta, p1action: updated.player1_action, p2action: updated.player2_action };
+}
+
 // Keep old duel stubs so exports don't break — redirect to roulette
 function createDuelGame(i, o, b)   { return createRouletteGame(i, o, b); }
 function getDuelGame(id)            { return getRouletteGame(id); }
@@ -742,4 +1090,8 @@ module.exports = {
   createSniperGame, getSniperGame, getSniperGameByUser, makeGuess,
   createSafeGame, getSafeGame, getSafeGameByUser, getOpenSafeGames, acceptSafeGame, cancelSafeGame, safeGuess,
   createDetectiveGame, getDetectiveGame, getDetectiveGameByUser, getOpenDetectiveGames, acceptDetectiveGame, cancelDetectiveGame, detectiveAccuse, detectiveAnswer, detectiveAnswerQuestion,
+  createDartsGame, getDartsGame, getDartsGameByUser, getOpenDartsGames, acceptDartsGame, cancelDartsGame, recordDartsThrow,
+  createThimblesGame, getThimblesGame, getThimblesGameByUser, getOpenThimblesGames, acceptThimblesGame, cancelThimblesGame, thimblesGuess,
+  createDungeonGame, getDungeonGame, getDungeonGameByUser, getOpenDungeonGames, acceptDungeonGame, cancelDungeonGame, dungeonAct,
+  createSpaceGame, getSpaceGame, getSpaceGameByUser, getOpenSpaceGames, acceptSpaceGame, cancelSpaceGame, spaceAct, SPACE_EVENTS, SPACE_OUTCOMES,
 };
