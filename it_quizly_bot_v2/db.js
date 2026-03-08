@@ -426,16 +426,36 @@ function resolveDuelRound(gameId) {
   const game = getDuelGame(gameId);
   if (!game || !game.initiator_action || !game.opponent_action) return null;
 
+  // Rock-paper-scissors triangle:
+  // attack   beats pierce  (атака бьёт пробитие)
+  // pierce   beats defend  (пробитие бьёт защиту)
+  // defend   beats attack  (защита блокирует атаку)
+  // same vs same = 0 damage to both
   function dmgTo(myAction, theirAction) {
-    if (myAction === "attack" && theirAction === "attack") return 1;
-    if (myAction === "attack" && theirAction === "dodge")  return 1;
+    if (myAction === theirAction) return 0;
+    if (myAction === "attack" && theirAction === "pierce") return 1;
+    if (myAction === "pierce" && theirAction === "defend") return 1;
+    if (myAction === "defend" && theirAction === "attack") return 0; // defend wins = attacker deals 0
+    // losing combinations deal 0
     return 0;
   }
 
+  // damage TO initiator = opponent's action vs initiator's action
   const iDmg = dmgTo(game.opponent_action, game.initiator_action);
   const oDmg = dmgTo(game.initiator_action, game.opponent_action);
-  const newIHp = game.initiator_hp - iDmg;
-  const newOHp = game.opponent_hp - oDmg;
+
+  let newIHp = game.initiator_hp - iDmg;
+  let newOHp = game.opponent_hp - oDmg;
+
+  // Revolver: after round 7, random player takes 1 damage
+  let revolverVictimId = null;
+  if (game.round >= 7) {
+    const hitInitiator = Math.random() < 0.5;
+    revolverVictimId = hitInitiator ? game.initiator_id : game.opponent_id;
+    if (hitInitiator) newIHp -= 1;
+    else newOHp -= 1;
+  }
+
   const finished = newIHp <= 0 || newOHp <= 0;
 
   run(`UPDATE duel_games SET initiator_hp=?, opponent_hp=?, initiator_action=NULL, opponent_action=NULL, round=?, status=? WHERE id=?`,
@@ -459,7 +479,9 @@ function resolveDuelRound(gameId) {
   return {
     initiatorAction: game.initiator_action,
     opponentAction: game.opponent_action,
-    iDmg, oDmg, newIHp, newOHp, finished, isDraw, winnerId, round: game.round,
+    iDmg, oDmg, newIHp, newOHp, finished, isDraw, winnerId,
+    round: game.round,
+    revolverVictimId,
   };
 }
 function getOpenDuelGames() {

@@ -494,7 +494,7 @@ function duelActionKeyboard(gameId) {
     inline_keyboard: [[
       { text: "⚔️ Атака",  callback_data: `duel_action_${gameId}_attack` },
       { text: "🛡 Защита", callback_data: `duel_action_${gameId}_defend` },
-      { text: "💨 Уклон",  callback_data: `duel_action_${gameId}_dodge` },
+      { text: "💥 Пробитие", callback_data: `duel_action_${gameId}_pierce` },
     ]],
   };
 }
@@ -516,7 +516,7 @@ function hpBar(hp, maxHp = 3) {
 }
 
 function actionEmoji(action) {
-  return { attack: "⚔️", defend: "🛡", dodge: "💨" }[action] || "?";
+  return { attack: "⚔️", defend: "🛡", pierce: "💥" }[action] || "?";
 }
 
 // ── ADMIN ─────────────────────────────────────────────────────────────────────
@@ -1183,20 +1183,15 @@ bot.on("callback_query", async (query) => {
 
         log.logDiceResult(result.initiator_id, result.opponent_id, result.bet, iRoll, oRoll, result.winnerId);
 
-        const rematchKeyboard = diceRematchKeyboard(
-          userId === result.initiator_id ? result.opponent_id : result.initiator_id,
-          result.bet
-        );
-
         const resultText =
           `🎲 <b>Результат!</b>\n\n` +
           `${esc(iName)}: ${iEmoji} <b>${iRoll}</b>\n` +
           `${esc(oName)}: ${oEmoji} <b>${oRoll}</b>\n\n` +
           outcomeText;
 
-        // Send results to both players
-        try { await bot.sendMessage(result.initiator_id, resultText, { reply_markup: rematchKeyboard, parse_mode: "HTML" }); } catch(_) {}
-        try { await bot.sendMessage(result.opponent_id,  resultText, { reply_markup: rematchKeyboard, parse_mode: "HTML" }); } catch(_) {}
+        // Send results to both players with correct rematch opponentId for each
+        try { await bot.sendMessage(result.initiator_id, resultText, { reply_markup: diceRematchKeyboard(result.opponent_id, result.bet), parse_mode: "HTML" }); } catch(_) {}
+        try { await bot.sendMessage(result.opponent_id,  resultText, { reply_markup: diceRematchKeyboard(result.initiator_id, result.bet), parse_mode: "HTML" }); } catch(_) {}
       }
       return;
     }
@@ -1358,10 +1353,11 @@ bot.on("callback_query", async (query) => {
       return bot.editMessageText(
         `⚔️ <b>Дуэль</b>\n\nВступи в открытый вызов или создай свой:\n\n` +
         `• У каждого <b>3 HP ❤️</b>\n` +
-        `• Каждый раунд: <b>⚔️ Атака</b>, <b>🛡 Защита</b>, <b>💨 Уклон</b>\n` +
-        `• Атака vs Уклон → 1 урон\n` +
-        `• Атака vs Атака → оба -1 HP\n` +
-        `• Атака vs Защита → заблокировано\n` +
+        `• Каждый раунд: <b>⚔️ Атака</b>, <b>🛡 Защита</b>, <b>💥 Пробитие</b>\n` +
+        `• ⚔️ Атака бьёт 💥 Пробитие\n` +
+        `• 💥 Пробитие бьёт 🛡 Защиту\n` +
+        `• 🛡 Защита блокирует ⚔️ Атаку\n` +
+        `• После раунда 7: 🔫 Револьвер бьёт случайного игрока!\n` +
         `• Победитель забирает банк!`,
         { chat_id: chatId, message_id: message.message_id, reply_markup: duelLobbyKeyboard(users, openGames), parse_mode: "HTML" }
       );
@@ -1531,7 +1527,7 @@ bot.on("callback_query", async (query) => {
     if (data.startsWith("duel_action_")) {
       const parts = data.split("_"); // duel_action_<gameId>_<action>
       const gameId  = parseInt(parts[2]);
-      const action  = parts[3]; // attack | defend | dodge
+      const action  = parts[3]; // attack | defend | pierce
 
       const game = db.getDuelGame(gameId);
       if (!game || game.status !== "active") {
@@ -1551,7 +1547,7 @@ bot.on("callback_query", async (query) => {
 
       // Disable buttons for this player
       await bot.editMessageText(
-        `${actionEmoji(action)} Ты выбрал <b>${action === "attack" ? "Атаку" : action === "defend" ? "Защиту" : "Уклон"}</b>.\n\n⏳ Ждём соперника...`,
+        `${actionEmoji(action)} Ты выбрал <b>${action === "attack" ? "Атаку" : action === "defend" ? "Защиту" : "Пробитие"}</b>.\n\n⏳ Ждём соперника...`,
         { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" }
       );
 
@@ -1568,10 +1564,14 @@ bot.on("callback_query", async (query) => {
       const iName = initiatorUser?.username ? `@${initiatorUser.username}` : "Игрок 1";
       const oName = opponentUser?.username  ? `@${opponentUser.username}`  : "Игрок 2";
 
+      const revolverLine = roundResult.revolverVictimId
+        ? `\n🔫 <b>Револьвер выстрелил!</b> Пострадал ${roundResult.revolverVictimId === game.initiator_id ? esc(iName) : esc(oName)} (-1 HP)\n`
+        : "";
       const roundSummary =
         `⚔️ <b>Раунд ${roundResult.round} завершён!</b>\n\n` +
         `${esc(iName)}: ${actionEmoji(roundResult.initiatorAction)} → получил ${roundResult.iDmg} урона\n` +
-        `${esc(oName)}: ${actionEmoji(roundResult.opponentAction)} → получил ${roundResult.oDmg} урона\n\n`;
+        `${esc(oName)}: ${actionEmoji(roundResult.opponentAction)} → получил ${roundResult.oDmg} урона\n` +
+        revolverLine + `\n`;
 
       if (roundResult.finished) {
         let outcome;
@@ -1589,13 +1589,11 @@ bot.on("callback_query", async (query) => {
 
         log.logDuelResult(game.initiator_id, game.opponent_id, game.bet, roundResult.winnerId, roundResult.round);
 
-        const rematchKb = duelRematchKeyboard(
-          userId === game.initiator_id ? game.opponent_id : game.initiator_id,
-          game.bet
-        );
+        const rematchKbForInitiator = duelRematchKeyboard(game.opponent_id, game.bet);
+        const rematchKbForOpponent  = duelRematchKeyboard(game.initiator_id, game.bet);
 
-        try { await bot.sendMessage(game.initiator_id, finalText, { reply_markup: rematchKb, parse_mode: "HTML" }); } catch(_) {}
-        try { await bot.sendMessage(game.opponent_id,  finalText, { reply_markup: rematchKb, parse_mode: "HTML" }); } catch(_) {}
+        try { await bot.sendMessage(game.initiator_id, finalText, { reply_markup: rematchKbForInitiator, parse_mode: "HTML" }); } catch(_) {}
+        try { await bot.sendMessage(game.opponent_id,  finalText, { reply_markup: rematchKbForOpponent,  parse_mode: "HTML" }); } catch(_) {}
 
       } else {
         // Next round
