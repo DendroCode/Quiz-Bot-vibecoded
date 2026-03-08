@@ -341,9 +341,10 @@ function diceLobbyKeyboard(users, openGames) {
     rows.push([{ text: "━━━ Новый вызов ━━━", callback_data: "dice_noop" }]);
   }
   // Players to challenge directly
-  const knownUsers = users.filter(u => u.username).slice(0, 6);
+  const knownUsers = users.slice(0, 6);
   for (const u of knownUsers) {
-    rows.push([{ text: `👤 @${u.username}`, callback_data: `dice_challenge_${u.telegram_id}` }]);
+    const name = u.username ? `@${u.username}` : `id:${u.telegram_id}`;
+    rows.push([{ text: `👤 ${name}`, callback_data: `dice_challenge_${u.telegram_id}` }]);
   }
   rows.push([{ text: "🌍 Открытый вызов (всем)", callback_data: "dice_challenge_open" }]);
   rows.push([{ text: "⬅️ Назад", callback_data: "menu_games" }]);
@@ -453,9 +454,10 @@ function duelLobbyKeyboard(users, openGames) {
     }
     rows.push([{ text: "━━━ Новый вызов ━━━", callback_data: "duel_noop" }]);
   }
-  const knownUsers = users.filter(u => u.username).slice(0, 6);
+  const knownUsers = users.slice(0, 6);
   for (const u of knownUsers) {
-    rows.push([{ text: `👤 @${u.username}`, callback_data: `duel_challenge_${u.telegram_id}` }]);
+    const name = u.username ? `@${u.username}` : `id:${u.telegram_id}`;
+    rows.push([{ text: `👤 ${name}`, callback_data: `duel_challenge_${u.telegram_id}` }]);
   }
   rows.push([{ text: "🌍 Открытый вызов (всем)", callback_data: "duel_challenge_open" }]);
   rows.push([{ text: "⬅️ Назад", callback_data: "menu_games" }]);
@@ -491,11 +493,7 @@ function duelAcceptKeyboard(gameId) {
 
 function duelActionKeyboard(gameId) {
   return {
-    inline_keyboard: [[
-      { text: "⚔️ Атака",  callback_data: `duel_action_${gameId}_attack` },
-      { text: "🛡 Защита", callback_data: `duel_action_${gameId}_defend` },
-      { text: "💥 Пробитие", callback_data: `duel_action_${gameId}_pierce` },
-    ]],
+    inline_keyboard: [[{ text: "🔫 Нажать на курок", callback_data: `duel_pull_${gameId}` }]],
   };
 }
 
@@ -960,7 +958,7 @@ bot.on("callback_query", async (query) => {
       if (data === "dice_noop") return;
       const users = db.getAllUsers()
         .map(u => db.getUser(u.telegram_id))
-        .filter(u => u && u.telegram_id !== userId && u.username);
+        .filter(u => u && u.telegram_id !== userId);
       const openGames = db.getOpenDiceGames().filter(g => g.initiator_id !== userId);
       return bot.editMessageText(
         `🎲 <b>Кости</b>\n\nВступи в открытый вызов или создай свой:\n\nПравила: оба бросают кубик, больше — побеждает. При ничьей ставки возвращаются.`,
@@ -1348,17 +1346,15 @@ bot.on("callback_query", async (query) => {
       if (data === "duel_noop") return;
       const users = db.getAllUsers()
         .map(u => db.getUser(u.telegram_id))
-        .filter(u => u && u.telegram_id !== userId && u.username);
+        .filter(u => u && u.telegram_id !== userId);
       const openGames = db.getOpenDuelGames().filter(g => g.initiator_id !== userId);
       return bot.editMessageText(
-        `⚔️ <b>Дуэль</b>\n\nВступи в открытый вызов или создай свой:\n\n` +
-        `• У каждого <b>3 HP ❤️</b>\n` +
-        `• Каждый раунд: <b>⚔️ Атака</b>, <b>🛡 Защита</b>, <b>💥 Пробитие</b>\n` +
-        `• ⚔️ Атака бьёт 💥 Пробитие\n` +
-        `• 💥 Пробитие бьёт 🛡 Защиту\n` +
-        `• 🛡 Защита блокирует ⚔️ Атаку\n` +
-        `• После раунда 7: 🔫 Револьвер бьёт случайного игрока!\n` +
-        `• Победитель забирает банк!`,
+        `🔫 <b>Русская рулетка</b>\n\nВступи в открытый вызов или создай свой:\n\n` +
+        `• Барабан на 6 патронов, 1 заряжен\n` +
+        `• Игроки нажимают на курок по очереди\n` +
+        `• Вероятность выстрела растёт с каждым ходом\n` +
+        `• Кто получил пулю — проиграл 💀\n` +
+        `• Победитель забирает весь банк!`,
         { chat_id: chatId, message_id: message.message_id, reply_markup: duelLobbyKeyboard(users, openGames), parse_mode: "HTML" }
       );
     }
@@ -1451,12 +1447,12 @@ bot.on("callback_query", async (query) => {
       );
     }
 
-    // Accept duel
+    // Accept roulette challenge
     if (data.startsWith("duel_accept_")) {
       const gameId = parseInt(data.replace("duel_accept_", ""));
       const game = db.getDuelGame(gameId);
       if (!game || game.status !== "pending") {
-        return bot.answerCallbackQuery(queryId, { text: "❌ Дуэль уже недоступна.", show_alert: true });
+        return bot.answerCallbackQuery(queryId, { text: "❌ Вызов уже недоступен.", show_alert: true });
       }
       if (game.initiator_id === userId) {
         return bot.answerCallbackQuery(queryId, { text: "❌ Нельзя принять собственный вызов!", show_alert: true });
@@ -1466,39 +1462,29 @@ bot.on("callback_query", async (query) => {
         return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${game.bet} 💵, у тебя ${user?.svodollars || 0}`, show_alert: true });
       }
       const ok = db.acceptDuelGame(gameId, userId);
-      if (!ok) return bot.answerCallbackQuery(queryId, { text: "❌ Ошибка принятия дуэли.", show_alert: true });
+      if (!ok) return bot.answerCallbackQuery(queryId, { text: "❌ Ошибка принятия.", show_alert: true });
 
-      await bot.answerCallbackQuery(queryId, { text: "⚔️ Принято! Дуэль начинается!" });
+      await bot.answerCallbackQuery(queryId, { text: "🔫 Принято! Рулетка начинается!" });
 
       const initiatorUser = db.getUser(game.initiator_id);
       const opponentUser  = db.getUser(userId);
       const iName = initiatorUser?.username ? `@${initiatorUser.username}` : "Игрок 1";
       const oName = opponentUser?.username  ? `@${opponentUser.username}`  : "Игрок 2";
 
-      const roundText = (iHp, oHp, round) =>
-        `⚔️ <b>Дуэль — Раунд ${round}</b>\n\n` +
-        `${esc(iName)}: ${hpBar(iHp)}\n` +
-        `${esc(oName)}: ${hpBar(oHp)}\n\n` +
-        `Ставка: <b>${game.bet} 💵</b>\n\nВыбери действие 👇`;
+      const startText =
+        `🔫 <b>Русская рулетка началась!</b>\n\n` +
+        `${esc(iName)} vs ${esc(oName)}\n` +
+        `Ставка: <b>${game.bet} 💵</b>\n\n` +
+        `Барабан заряжен. 6 патронов, 1 настоящий.\n` +
+        `Первым крутит ${esc(iName)} 🎯`;
 
-      // Send action buttons to both
-      try {
-        const iMsg = await bot.sendMessage(game.initiator_id, roundText(3, 3, 1), { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" });
-        db.setDuelMsgId(gameId, "initiator_msg_id", iMsg.message_id);
-      } catch(_) {}
-      try {
-        const oMsg = await bot.sendMessage(userId, roundText(3, 3, 1), { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" });
-        db.setDuelMsgId(gameId, "opponent_msg_id", oMsg.message_id);
-      } catch(_) {}
-
-      // Edit the accept message
-      await bot.editMessageText("⚔️ Дуэль началась! Проверь своё личное сообщение с кнопками действий.", {
-        chat_id: chatId, message_id: message.message_id,
-      });
+      try { await bot.sendMessage(game.initiator_id, startText, { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" }); } catch(_) {}
+      try { await bot.sendMessage(userId, startText, { parse_mode: "HTML" }); } catch(_) {}
+      await bot.editMessageText("🔫 Рулетка началась!", { chat_id: chatId, message_id: message.message_id });
       return;
     }
 
-    // Decline duel
+    // Decline roulette
     if (data.startsWith("duel_decline_")) {
       const gameId = parseInt(data.replace("duel_decline_", ""));
       const game = db.getDuelGame(gameId);
@@ -1513,7 +1499,7 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // Cancel duel
+    // Cancel roulette
     if (data.startsWith("duel_cancel_")) {
       const gameId = parseInt(data.replace("duel_cancel_", ""));
       const game = db.getDuelGame(gameId);
@@ -1523,88 +1509,76 @@ bot.on("callback_query", async (query) => {
       return bot.editMessageText("🚫 Вызов отменён. Ставка возвращена.", { chat_id: chatId, message_id: message.message_id });
     }
 
-    // Duel action
-    if (data.startsWith("duel_action_")) {
-      const parts = data.split("_"); // duel_action_<gameId>_<action>
-      const gameId  = parseInt(parts[2]);
-      const action  = parts[3]; // attack | defend | pierce
+    // Pull the trigger
+    if (data.startsWith("duel_pull_")) {
+      const gameId = parseInt(data.replace("duel_pull_", ""));
+      const game = db.getRouletteGame(gameId);
 
-      const game = db.getDuelGame(gameId);
       if (!game || game.status !== "active") {
-        return bot.answerCallbackQuery(queryId, { text: "❌ Дуэль недоступна.", show_alert: true });
+        return bot.answerCallbackQuery(queryId, { text: "❌ Игра недоступна.", show_alert: true });
       }
-      const isInitiator = game.initiator_id === userId;
-      const isOpponent  = game.opponent_id  === userId;
-      if (!isInitiator && !isOpponent) {
-        return bot.answerCallbackQuery(queryId, { text: "❌ Ты не участник этой дуэли.", show_alert: true });
+      if (game.current_turn !== userId) {
+        return bot.answerCallbackQuery(queryId, { text: "⏳ Сейчас не твой ход!", show_alert: true });
       }
-      // Check if already chosen
-      if ((isInitiator && game.initiator_action) || (isOpponent && game.opponent_action)) {
-        return bot.answerCallbackQuery(queryId, { text: "⏳ Ты уже выбрал действие. Ждём соперника...", show_alert: true });
-      }
-
-      await bot.answerCallbackQuery(queryId, { text: `${actionEmoji(action)} Выбрано: ${action}. Ждём соперника...` });
-
-      // Disable buttons for this player
-      await bot.editMessageText(
-        `${actionEmoji(action)} Ты выбрал <b>${action === "attack" ? "Атаку" : action === "defend" ? "Защиту" : "Пробитие"}</b>.\n\n⏳ Ждём соперника...`,
-        { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" }
-      );
-
-      const updated = db.setDuelAction(gameId, userId, action);
-
-      // Check if both acted
-      if (!updated.initiator_action || !updated.opponent_action) return;
-
-      const roundResult = db.resolveDuelRound(gameId);
-      if (!roundResult) return;
 
       const initiatorUser = db.getUser(game.initiator_id);
       const opponentUser  = db.getUser(game.opponent_id);
       const iName = initiatorUser?.username ? `@${initiatorUser.username}` : "Игрок 1";
       const oName = opponentUser?.username  ? `@${opponentUser.username}`  : "Игрок 2";
+      const myName = userId === game.initiator_id ? iName : oName;
+      const nextName = userId === game.initiator_id ? oName : iName;
 
-      const revolverLine = roundResult.revolverVictimId
-        ? `\n🔫 <b>Револьвер выстрелил!</b> Пострадал ${roundResult.revolverVictimId === game.initiator_id ? esc(iName) : esc(oName)} (-1 HP)\n`
-        : "";
-      const roundSummary =
-        `⚔️ <b>Раунд ${roundResult.round} завершён!</b>\n\n` +
-        `${esc(iName)}: ${actionEmoji(roundResult.initiatorAction)} → получил ${roundResult.iDmg} урона\n` +
-        `${esc(oName)}: ${actionEmoji(roundResult.opponentAction)} → получил ${roundResult.oDmg} урона\n` +
-        revolverLine + `\n`;
+      await bot.answerCallbackQuery(queryId, { text: "🔫 Крутишь барабан..." });
 
-      if (roundResult.finished) {
-        let outcome;
-        if (roundResult.isDraw) {
-          outcome = `🤝 <b>Ничья!</b> Оба погибли одновременно. Ставки возвращены.`;
-        } else {
-          const winnerUser = db.getUser(roundResult.winnerId);
-          const winnerName = winnerUser?.username ? `@${winnerUser.username}` : "победитель";
-          outcome = `🏆 <b>Победил ${esc(winnerName)}!</b>\nПрибыль: +${game.bet} 💵`;
-        }
+      // Edit to show suspense
+      await bot.editMessageText(
+        `🔫 <b>${esc(myName)} нажимает на курок...</b>\n\n` +
+        `Патрон ${game.chamber + 1} из 6\n` +
+        `Вероятность выстрела: <b>${game.chamber + 1}/6</b> 😰`,
+        { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" }
+      );
 
-        const finalText = roundSummary +
-          `${esc(iName)}: ${hpBar(roundResult.newIHp)}\n` +
-          `${esc(oName)}: ${hpBar(roundResult.newOHp)}\n\n` + outcome;
+      // Small delay for suspense
+      await new Promise(r => setTimeout(r, 1500));
 
-        log.logDuelResult(game.initiator_id, game.opponent_id, game.bet, roundResult.winnerId, roundResult.round);
+      const result = db.pullTrigger(gameId, userId);
+      if (!result) return;
+
+      if (result.fired) {
+        // BANG
+        const loserUser  = db.getUser(result.loserId);
+        const winnerUser = db.getUser(result.winnerId);
+        const loserName  = loserUser?.username  ? `@${loserUser.username}`  : "Игрок";
+        const winnerName = winnerUser?.username ? `@${winnerUser.username}` : "Игрок";
+
+        log.logDuelResult(game.initiator_id, game.opponent_id, game.bet, result.winnerId, game.chamber + 1);
+
+        const finalText =
+          `💥 <b>БАХ!</b>\n\n` +
+          `<b>${esc(loserName)}</b> получил пулю! 💀\n\n` +
+          `🏆 Победил <b>${esc(winnerName)}</b>!\n` +
+          `Выигрыш: <b>+${game.bet} 💵</b>`;
 
         const rematchKbForInitiator = duelRematchKeyboard(game.opponent_id, game.bet);
         const rematchKbForOpponent  = duelRematchKeyboard(game.initiator_id, game.bet);
 
+        try { await bot.editMessageText(finalText, { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" }); } catch(_) {}
         try { await bot.sendMessage(game.initiator_id, finalText, { reply_markup: rematchKbForInitiator, parse_mode: "HTML" }); } catch(_) {}
         try { await bot.sendMessage(game.opponent_id,  finalText, { reply_markup: rematchKbForOpponent,  parse_mode: "HTML" }); } catch(_) {}
 
       } else {
-        // Next round
-        const nextRoundText = roundSummary +
-          `<b>Счёт после раунда:</b>\n` +
-          `${esc(iName)}: ${hpBar(roundResult.newIHp)}\n` +
-          `${esc(oName)}: ${hpBar(roundResult.newOHp)}\n\n` +
-          `⚔️ <b>Раунд ${roundResult.round + 1} — выбирай действие!</b>`;
+        // Safe — next player's turn
+        const safeText =
+          `😮‍💨 <b>Осечка!</b> ${esc(myName)} выжил.\n\n` +
+          `Патронов проверено: ${result.chamber + 1}/6\n` +
+          `Теперь очередь <b>${esc(nextName)}</b> 🎯`;
 
-        try { await bot.sendMessage(game.initiator_id, nextRoundText, { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" }); } catch(_) {}
-        try { await bot.sendMessage(game.opponent_id,  nextRoundText, { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" }); } catch(_) {}
+        await bot.editMessageText(safeText, { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" });
+
+        // Send trigger button to next player
+        try {
+          await bot.sendMessage(result.nextTurn, safeText, { reply_markup: duelActionKeyboard(gameId), parse_mode: "HTML" });
+        } catch(_) {}
       }
       return;
     }

@@ -1,7 +1,7 @@
 const Database = require("better-sqlite3");
 const path = require("path");
 
-const DB_PATH = path.join(__dirname, "quiz.db");
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "quiz.db");
 let db;
 
 function initDB() {
@@ -94,6 +94,20 @@ function initDB() {
       initiator_msg_id INTEGER,
       opponent_msg_id INTEGER,
       status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Russian roulette games
+    CREATE TABLE IF NOT EXISTS roulette_games (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      initiator_id INTEGER NOT NULL,
+      opponent_id INTEGER,
+      bet INTEGER NOT NULL,
+      current_turn INTEGER,        -- telegram_id whose turn it is
+      chamber INTEGER DEFAULT 0,   -- current chamber position 0-5
+      bullet INTEGER NOT NULL,     -- which chamber has the bullet 0-5
+      status TEXT DEFAULT 'pending', -- pending | active | finished | cancelled
+      loser_id INTEGER,
       created_at TEXT DEFAULT (datetime('now'))
     );
   `);
@@ -392,114 +406,88 @@ function setMineMsgId(gameId, msgId) {
 }
 
 // ── Duel ──────────────────────────────────────────────────────────────────────
-function createDuelGame(initiatorId, opponentId, bet) {
+// ── Russian Roulette ──────────────────────────────────────────────────────────
+
+function createRouletteGame(initiatorId, opponentId, bet) {
   if (!spendCoins(initiatorId, bet)) return null;
-  const r = run("INSERT INTO duel_games (initiator_id, opponent_id, bet, status) VALUES (?, ?, ?, 'pending')",
-    initiatorId, opponentId ?? null, bet);
+  const bullet = Math.floor(Math.random() * 6); // random chamber 0-5
+  const r = run(
+    "INSERT INTO roulette_games (initiator_id, opponent_id, bet, bullet, current_turn, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+    initiatorId, opponentId ?? null, bet, bullet, initiatorId
+  );
   return r.lastInsertRowid;
 }
-function getDuelGame(gameId) {
-  return getOne("SELECT * FROM duel_games WHERE id=?", gameId);
+
+function getRouletteGame(gameId) {
+  return getOne("SELECT * FROM roulette_games WHERE id=?", gameId);
 }
-function getDuelGameByUser(userId) {
+
+function getRouletteGameByUser(userId) {
   return getOne(
-    "SELECT * FROM duel_games WHERE (initiator_id=? OR opponent_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1",
+    "SELECT * FROM roulette_games WHERE (initiator_id=? OR opponent_id=?) AND status IN ('pending','active') ORDER BY id DESC LIMIT 1",
     userId, userId
   );
 }
-function acceptDuelGame(gameId, opponentId) {
-  const game = getDuelGame(gameId);
+
+function getOpenRouletteGames() {
+  return getAll("SELECT * FROM roulette_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+}
+
+function acceptRouletteGame(gameId, opponentId) {
+  const game = getRouletteGame(gameId);
   if (!game) return false;
   if (!spendCoins(opponentId, game.bet)) return false;
-  run("UPDATE duel_games SET opponent_id=?, status='active', current_turn=? WHERE id=?",
-    opponentId, game.initiator_id, gameId);
+  run("UPDATE roulette_games SET opponent_id=?, status='active' WHERE id=?", opponentId, gameId);
   return true;
 }
-function setDuelAction(gameId, userId, action) {
-  const game = getDuelGame(gameId);
-  if (!game) return null;
-  if (game.initiator_id === userId) run("UPDATE duel_games SET initiator_action=? WHERE id=?", action, gameId);
-  else run("UPDATE duel_games SET opponent_action=? WHERE id=?", action, gameId);
-  return getDuelGame(gameId);
-}
-function resolveDuelRound(gameId) {
-  const game = getDuelGame(gameId);
-  if (!game || !game.initiator_action || !game.opponent_action) return null;
 
-  // Rock-paper-scissors triangle:
-  // attack   beats pierce  (атака бьёт пробитие)
-  // pierce   beats defend  (пробитие бьёт защиту)
-  // defend   beats attack  (защита блокирует атаку)
-  // same vs same = 0 damage to both
-  function dmgTo(myAction, theirAction) {
-    if (myAction === theirAction) return 0;
-    if (myAction === "attack" && theirAction === "pierce") return 1;
-    if (myAction === "pierce" && theirAction === "defend") return 1;
-    if (myAction === "defend" && theirAction === "attack") return 0; // defend wins = attacker deals 0
-    // losing combinations deal 0
-    return 0;
+// Pull the trigger — returns { fired, chamber, nextTurn, finished, loserId, winnerId }
+function pullTrigger(gameId, userId) {
+  const game = getRouletteGame(gameId);
+  if (!game || game.status !== "active") return null;
+  if (game.current_turn !== userId) return null;
+
+  const fired = game.chamber === game.bullet;
+  const nextChamber = game.chamber + 1;
+  const nextTurn = game.current_turn === game.initiator_id ? game.opponent_id : game.initiator_id;
+
+  if (fired) {
+    // This player lost
+    const loserId  = userId;
+    const winnerId = userId === game.initiator_id ? game.opponent_id : game.initiator_id;
+    run("UPDATE roulette_games SET chamber=?, status='finished', loser_id=? WHERE id=?",
+      nextChamber, loserId, gameId);
+    addCoins(winnerId, game.bet * 2);
+    run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
+    run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
+    return { fired: true, chamber: game.chamber, finished: true, loserId, winnerId };
   }
 
-  // damage TO initiator = opponent's action vs initiator's action
-  const iDmg = dmgTo(game.opponent_action, game.initiator_action);
-  const oDmg = dmgTo(game.initiator_action, game.opponent_action);
-
-  let newIHp = game.initiator_hp - iDmg;
-  let newOHp = game.opponent_hp - oDmg;
-
-  // Revolver: after round 7, random player takes 1 damage
-  let revolverVictimId = null;
-  if (game.round >= 7) {
-    const hitInitiator = Math.random() < 0.5;
-    revolverVictimId = hitInitiator ? game.initiator_id : game.opponent_id;
-    if (hitInitiator) newIHp -= 1;
-    else newOHp -= 1;
-  }
-
-  const finished = newIHp <= 0 || newOHp <= 0;
-
-  run(`UPDATE duel_games SET initiator_hp=?, opponent_hp=?, initiator_action=NULL, opponent_action=NULL, round=?, status=? WHERE id=?`,
-    newIHp, newOHp, game.round + 1, finished ? "finished" : "active", gameId);
-
-  let winnerId = null, isDraw = false;
-  if (finished) {
-    if (newIHp <= 0 && newOHp <= 0) {
-      isDraw = true;
-      addCoins(game.initiator_id, game.bet);
-      addCoins(game.opponent_id, game.bet);
-    } else {
-      winnerId = newIHp > 0 ? game.initiator_id : game.opponent_id;
-      const loserId = winnerId === game.initiator_id ? game.opponent_id : game.initiator_id;
-      addCoins(winnerId, game.bet * 2);
-      run("UPDATE users SET duel_wins=duel_wins+1, duel_earned=duel_earned+? WHERE telegram_id=?", game.bet, winnerId);
-      run("UPDATE users SET duel_losses=duel_losses+1 WHERE telegram_id=?", loserId);
-    }
-  }
-
-  return {
-    initiatorAction: game.initiator_action,
-    opponentAction: game.opponent_action,
-    iDmg, oDmg, newIHp, newOHp, finished, isDraw, winnerId,
-    round: game.round,
-    revolverVictimId,
-  };
-}
-function getOpenDuelGames() {
-  return getAll("SELECT * FROM duel_games WHERE status='pending' AND opponent_id IS NULL ORDER BY id DESC LIMIT 10");
+  // Safe — advance chamber and switch turn
+  run("UPDATE roulette_games SET chamber=?, current_turn=? WHERE id=?", nextChamber, nextTurn, gameId);
+  return { fired: false, chamber: game.chamber, finished: false, nextTurn };
 }
 
-function cancelDuelGame(gameId) {
-  const game = getDuelGame(gameId);
+function cancelRouletteGame(gameId) {
+  const game = getRouletteGame(gameId);
   if (!game) return;
   if (game.status === "pending") addCoins(game.initiator_id, game.bet);
   if (game.status === "active") {
     addCoins(game.initiator_id, game.bet);
     if (game.opponent_id) addCoins(game.opponent_id, game.bet);
   }
-  run("UPDATE duel_games SET status='cancelled' WHERE id=?", gameId);
+  run("UPDATE roulette_games SET status='cancelled' WHERE id=?", gameId);
 }
+
+// Keep old duel stubs so exports don't break — redirect to roulette
+function createDuelGame(i, o, b)   { return createRouletteGame(i, o, b); }
+function getDuelGame(id)            { return getRouletteGame(id); }
+function getDuelGameByUser(uid)     { return getRouletteGameByUser(uid); }
+function getOpenDuelGames()         { return getOpenRouletteGames(); }
+function acceptDuelGame(id, oid)    { return acceptRouletteGame(id, oid); }
+function cancelDuelGame(id)         { return cancelRouletteGame(id); }
 function setDuelMsgId(gameId, field, msgId) {
-  run(`UPDATE duel_games SET ${field}=? WHERE id=?`, msgId, gameId);
+  // roulette_games doesn't have msg fields yet — safe no-op
 }
 
 module.exports = {
@@ -512,6 +500,7 @@ module.exports = {
   finishDiceGame, cancelDiceGame, setDiceMsgId,
   createMineGame, getMineGame, getActiveMineGame, revealMineCell, cashoutMine, setMineMsgId,
   MINE_TOTAL, MINE_SAFE,
-  createDuelGame, getDuelGame, getDuelGameByUser, getOpenDuelGames, acceptDuelGame, setDuelAction,
-  resolveDuelRound, cancelDuelGame, setDuelMsgId,
+  createDuelGame, getDuelGame, getDuelGameByUser, getOpenDuelGames, acceptDuelGame,
+  cancelDuelGame, setDuelMsgId, pullTrigger,
+  cancelDuelGame, setDuelMsgId, pullTrigger,
 };
