@@ -115,7 +115,6 @@ function gamesMenuKeyboard() {
       [{ text: "🎩 Напёрстки",     callback_data: "thimbles_menu" }],
       [{ text: "🏰 Подземелье",    callback_data: "dungeon_menu" }],
       [{ text: "🚀 Космос",        callback_data: "space_menu" }],
-      [{ text: "🔐 Взлом сейфа",  callback_data: "safe_menu" }],
       [{ text: "🕵️ Детектив",     callback_data: "detective_menu" }],
       [{ text: "⬅️ Назад",        callback_data: "menu_main" }],
     ],
@@ -158,35 +157,6 @@ function sniperGuessKeyboard(gameId, min, max) {
     return { inline_keyboard: rows.slice(1) }; // skip range row when showing individual
   }
   return { inline_keyboard: rows };
-}
-
-function safeLobbyKeyboard(users, openGames) {
-  const rows = [];
-  if (openGames && openGames.length > 0) {
-    rows.push([{ text: "━━━ Открытые игры ━━━", callback_data: "safe_noop" }]);
-    for (const g of openGames) {
-      const u = db.getUser(g.initiator_id);
-      const name = u?.username ? `@${u.username}` : `id:${g.initiator_id}`;
-      rows.push([{ text: `✅ Вступить — ${name} (${g.bet}💵)`, callback_data: `safe_accept_${g.id}` }]);
-    }
-    rows.push([{ text: "━━━ Новая игра ━━━", callback_data: "safe_noop" }]);
-  }
-  users.slice(0, 5).forEach(u => {
-    const name = u.username ? `@${u.username}` : `id:${u.telegram_id}`;
-    rows.push([{ text: `👤 ${name}`, callback_data: `safe_challenge_${u.telegram_id}` }]);
-  });
-  rows.push([{ text: "🌍 Открытый вызов", callback_data: "safe_challenge_open" }]);
-  rows.push([{ text: "⬅️ Назад", callback_data: "menu_games" }]);
-  return { inline_keyboard: rows };
-}
-
-function safeBetKeyboard(opponentData) {
-  const s = opponentData || "open";
-  return { inline_keyboard: [
-    [{ text: "5 💵", callback_data: `safe_bet_5_${s}` }, { text: "10 💵", callback_data: `safe_bet_10_${s}` }, { text: "25 💵", callback_data: `safe_bet_25_${s}` }],
-    [{ text: "50 💵", callback_data: `safe_bet_50_${s}` }, { text: "100 💵", callback_data: `safe_bet_100_${s}` }],
-    [{ text: "⬅️ Назад", callback_data: "safe_menu" }],
-  ]};
 }
 
 function detectiveLobbyKeyboard(users, openGames) {
@@ -688,12 +658,13 @@ bot.onText(/\/start/, async (msg) => {
   log.logStart(msg.from);
   await bot.sendMessage(chatId,
     `👋 Привет, <b>${esc(first_name || username || "друг")}</b>!\n\n` +
-    `🤓 Добро пожаловать в <b>IT-викторину</b>!\n\n` +
-    `Темы: алгоритмы, SQL, сети, DevOps, frontend и другое.\n` +
-    `За правильные ответы получай <b>очки</b> и <b>💵 SVOллары</b>.\n` +
-    `На каждый вопрос — <b>${ANSWER_TIMEOUT_SEC} секунд</b>. ⏱\n` +
-    `В разделе <b>🎲 Игры</b> — кости, минное поле, дуэли! ⚔️\n\n` +
-    `Готов? 🚀`,
+    `🧠 <b>IT Quizly</b> — викторина и казино для айтишников.\n\n` +
+    `<b>Викторина:</b> алгоритмы, SQL, сети, DevOps, frontend — отвечай и зарабатывай 💵 SVOллары.\n\n` +
+    `<b>Игры на SVOллары:</b>\n` +
+    `🎲 Кости · 💣 Минное поле · 🔫 Рулетка\n` +
+    `🎯 Снайпер · 🎩 Напёрстки · 🎯 Дартс\n` +
+    `🏰 Подземелье · 🚀 Космос · 🕵️ Детектив\n\n` +
+    `Стартовый баланс: <b>250 💵</b> — не слей всё сразу 😄`,
     { reply_markup: mainMenuKeyboard(), parse_mode: "HTML" }
   );
 });
@@ -739,47 +710,6 @@ bot.onText(/\/profile/, async (msg) => {
     `🎮 Игр: ${user.games_played}\n🎯 Точность: ${accuracy}%\n🔥 Стрик: ${user.streak}`,
     { parse_mode: "HTML" }
   );
-});
-
-bot.onText(/\/safe (.+)/, async (msg, match) => {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
-  const guess = match[1].trim();
-  if (!/^\d{4}$/.test(guess)) {
-    return bot.sendMessage(chatId, "❌ Введи ровно 4 цифры. Пример: /safe 1234");
-  }
-  const game = db.getSafeGameByUser(userId);
-  if (!game || game.status !== "active") {
-    return bot.sendMessage(chatId, "❌ У тебя нет активной игры во взлом сейфа.");
-  }
-  const result = db.safeGuess(game.id, userId, guess);
-  if (!result) return bot.sendMessage(chatId, "❌ Ошибка.");
-  if (result.tooMany) return bot.sendMessage(chatId, "❌ Попытки закончились.");
-
-  const isInitiator = game.initiator_id === userId;
-  const myGuesses = JSON.parse(isInitiator ? db.getSafeGame(game.id).initiator_guesses : db.getSafeGame(game.id).opponent_guesses);
-  const history = myGuesses.map((g, i) => `${i+1}. <code>${g.guess}</code> — ✅${g.exact} 🔄${g.partial}`).join("\n");
-
-  if (result.finished) {
-    const winnerUser = result.winnerId ? db.getUser(result.winnerId) : null;
-    const winnerName = winnerUser?.username ? `@${winnerUser.username}` : "победитель";
-    let endText;
-    if (!result.winnerId) {
-      endText = `🤝 <b>Ничья!</b> Никто не взломал. Код был: <code>${result.code}</code>. Ставки возвращены.`;
-    } else if (result.winnerId === userId) {
-      endText = `🏆 <b>Ты взломал сейф!</b> Код: <code>${result.code}</code> за ${result.guessCount} попыток!\nВыигрыш: +${game.bet} 💵`;
-    } else {
-      endText = `💔 <b>Соперник взломал раньше!</b> Код: <code>${result.code}</code>.\nПотерял: ${game.bet} 💵`;
-    }
-    await bot.sendMessage(chatId, `${history}\n\n${endText}`, { parse_mode: "HTML" });
-    const otherId = isInitiator ? game.opponent_id : game.initiator_id;
-    try { await bot.sendMessage(otherId, endText, { parse_mode: "HTML" }); } catch(_) {}
-  } else if (result.solved) {
-    await bot.sendMessage(chatId, `${history}\n\n✅ <b>Взломан!</b> Ждём соперника...`, { parse_mode: "HTML" });
-  } else {
-    const left = 8 - result.guessCount;
-    await bot.sendMessage(chatId, `${history}\n\nОсталось попыток: <b>${left}</b>\n\nСледующая попытка: /safe XXXX`, { parse_mode: "HTML" });
-  }
 });
 
 bot.onText(/\/admin/, async (msg) => {
@@ -936,7 +866,10 @@ bot.on("callback_query", async (query) => {
     // ── Main menu ─────────────────────────────────────────────────────────────
     if (data === "menu_main") {
       await bot.answerCallbackQuery(queryId);
-      return bot.sendMessage(chatId, "🏠 Главное меню:", { reply_markup: mainMenuKeyboard(), parse_mode: "HTML" });
+      return bot.editMessageText(
+        `🏠 <b>Главное меню</b>\n\n💵 SVOллары тратятся в играх и магазине.\nЗарабатывай их в викторине или выигрывай у соперников.`,
+        { chat_id: chatId, message_id: message.message_id, reply_markup: mainMenuKeyboard(), parse_mode: "HTML" }
+      );
     }
 
     if (data === "menu_play") {
@@ -950,12 +883,18 @@ bot.on("callback_query", async (query) => {
     if (data === "menu_rules") {
       await bot.answerCallbackQuery(queryId);
       return bot.editMessageText(
-        `📖 <b>Правила игры:</b>\n\n` +
-        `• ${QUESTIONS_PER_GAME} вопросов за игру, 4 варианта ответа\n` +
+        `📖 <b>Правила</b>\n\n` +
+        `<b>Викторина:</b>\n` +
+        `• ${QUESTIONS_PER_GAME} вопросов, 4 варианта ответа\n` +
         `• На каждый вопрос — <b>${ANSWER_TIMEOUT_SEC} секунд</b> ⏱\n` +
-        `• За правильный ответ: +${POINTS_PER_CORRECT} очков и +${SVO_PER_CORRECT} 💵\n` +
-        `• Бонус за идеальную игру (7/7): +${SVO_PERFECT_BONUS} SVOлларов 🎯\n` +
-        `• SVOллары тратятся в магазине и на ставки в играх`,
+        `• Правильный ответ: +${POINTS_PER_CORRECT} очков, +${SVO_PER_CORRECT} 💵\n` +
+        `• Идеальная игра (7/7): +${SVO_PERFECT_BONUS} 💵 бонус 🎯\n` +
+        `• Ежедневный бонус: +100 💵 раз в 24 часа 🎁\n\n` +
+        `<b>Игры:</b>\n` +
+        `• SVOллары ставятся у обоих игроков\n` +
+        `• Победитель забирает весь банк\n` +
+        `• Кости и Дартс — Telegram dice (честный рандом)\n` +
+        `• Рулетка, Подземелье, Космос — стратегия решает`,
         {
           chat_id: chatId, message_id: message.message_id,
           reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "menu_main" }]] },
@@ -1940,89 +1879,6 @@ bot.on("callback_query", async (query) => {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    // ── SAFE CRACKER ──────────────────────────────────────────────────
-    // ════════════════════════════════════════════════════════════════════
-
-    if (data === "safe_menu" || data === "safe_noop") {
-      await bot.answerCallbackQuery(queryId);
-      if (data === "safe_noop") return;
-      const users = db.getAllUsers().map(u => db.getUser(u.telegram_id)).filter(u => u && u.telegram_id !== userId);
-      const openGames = db.getOpenSafeGames().filter(g => g.initiator_id !== userId);
-      return bot.editMessageText(
-        `🔐 <b>Взлом сейфа</b>\n\nОба игрока взламывают одинаковый 4-значный код.\nПосле каждой попытки: <b>✅ точных цифр</b> и <b>🔄 цифр не на своём месте</b>.\nМаксимум 8 попыток. Кто взломает первым — или за меньше попыток — победит!\n\nСтавки берутся у обоих игроков.`,
-        { chat_id: chatId, message_id: message.message_id, reply_markup: safeLobbyKeyboard(users, openGames), parse_mode: "HTML" }
-      );
-    }
-
-    if (data.startsWith("safe_challenge_")) {
-      await bot.answerCallbackQuery(queryId);
-      const opponentData = data.replace("safe_challenge_", "");
-      return bot.editMessageText(`🔐 Выбери ставку:`, { chat_id: chatId, message_id: message.message_id, reply_markup: safeBetKeyboard(opponentData), parse_mode: "HTML" });
-    }
-
-    if (data.startsWith("safe_bet_")) {
-      const parts = data.split("_"); // safe_bet_<amount>_<opponentData>
-      const bet = parseInt(parts[2]);
-      const opponentData = parts.slice(3).join("_");
-      const opponentId = opponentData === "open" ? null : parseInt(opponentData);
-      const user = db.getUser(userId);
-      if ((user?.svodollars || 0) < bet) {
-        return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${bet} 💵, у тебя ${user?.svodollars || 0}`, show_alert: true });
-      }
-      await bot.answerCallbackQuery(queryId);
-      const gameId = db.createSafeGame(userId, opponentId, bet);
-      if (!gameId) return bot.sendMessage(chatId, "❌ Ошибка создания игры.");
-      const myName = from.username ? `@${from.username}` : from.first_name;
-      if (opponentId) {
-        try { await bot.sendMessage(opponentId, `🔐 <b>${esc(myName)} приглашает взломать сейф!</b>\n\nСтавка: <b>${bet} 💵</b>`, { reply_markup: { inline_keyboard: [[{ text: "✅ Принять", callback_data: `safe_accept_${gameId}` }, { text: "❌ Отказать", callback_data: `safe_decline_${gameId}` }]] }, parse_mode: "HTML" }); } catch(_) {}
-        return bot.editMessageText(`🔐 Вызов отправлен!\n\nСтавка: <b>${bet} 💵</b>\nОжидаем ответа... ⏳`, { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "❌ Отменить", callback_data: `safe_cancel_${gameId}` }]] } });
-      } else {
-        const allUsers = db.getAllUsers();
-        for (const u of allUsers) {
-          if (u.telegram_id === userId) continue;
-          try { await bot.sendMessage(u.telegram_id, `🔐 <b>${esc(myName)} ищет соперника для взлома сейфа!</b>\n\nСтавка: <b>${bet} 💵</b>`, { reply_markup: { inline_keyboard: [[{ text: "✅ Вступить", callback_data: `safe_accept_${gameId}` }]] }, parse_mode: "HTML" }); } catch(_) {}
-          await new Promise(r => setTimeout(r, 30));
-        }
-        return bot.editMessageText(`🔐 Вызов разослан!\n\nСтавка: <b>${bet} 💵</b>`, { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "❌ Отменить", callback_data: `safe_cancel_${gameId}` }]] } });
-      }
-    }
-
-    if (data.startsWith("safe_accept_")) {
-      const gameId = parseInt(data.replace("safe_accept_", ""));
-      const game = db.getSafeGame(gameId);
-      if (!game || game.status !== "pending") return bot.answerCallbackQuery(queryId, { text: "❌ Игра недоступна.", show_alert: true });
-      if (game.initiator_id === userId) return bot.answerCallbackQuery(queryId, { text: "❌ Нельзя принять свой вызов!", show_alert: true });
-      const user = db.getUser(userId);
-      if ((user?.svodollars || 0) < game.bet) return bot.answerCallbackQuery(queryId, { text: `❌ Нужно ${game.bet} 💵`, show_alert: true });
-      const ok = db.acceptSafeGame(gameId, userId);
-      if (!ok) return bot.answerCallbackQuery(queryId, { text: "❌ Ошибка.", show_alert: true });
-      await bot.answerCallbackQuery(queryId, { text: "🔐 Игра началась! Взламывай сейф!" });
-      const startText = `🔐 <b>Взлом сейфа начался!</b>\n\nКод: 4 цифры (0–9)\nПосле попытки: ✅ = точная цифра на месте, 🔄 = есть но не там\nМакс. 8 попыток.\n\nВведи первую комбинацию — нажми /safe`;
-      try { await bot.sendMessage(game.initiator_id, startText, { parse_mode: "HTML" }); } catch(_) {}
-      await bot.editMessageText(startText, { chat_id: chatId, message_id: message.message_id, parse_mode: "HTML" });
-      return;
-    }
-
-    if (data.startsWith("safe_decline_")) {
-      const gameId = parseInt(data.replace("safe_decline_", ""));
-      const game = db.getSafeGame(gameId);
-      if (!game) return bot.answerCallbackQuery(queryId);
-      await bot.answerCallbackQuery(queryId, { text: "❌ Отклонено." });
-      db.cancelSafeGame(gameId);
-      await bot.editMessageText("❌ Ты отклонил вызов.", { chat_id: chatId, message_id: message.message_id });
-      try { await bot.sendMessage(game.initiator_id, "😔 Вызов отклонён. Ставка возвращена."); } catch(_) {}
-      return;
-    }
-
-    if (data.startsWith("safe_cancel_")) {
-      const gameId = parseInt(data.replace("safe_cancel_", ""));
-      const game = db.getSafeGame(gameId);
-      if (!game || game.initiator_id !== userId) return bot.answerCallbackQuery(queryId);
-      db.cancelSafeGame(gameId);
-      await bot.answerCallbackQuery(queryId, { text: "🚫 Отменено." });
-      return bot.editMessageText("🚫 Игра отменена. Ставка возвращена.", { chat_id: chatId, message_id: message.message_id });
-    }
-
     // ════════════════════════════════════════════════════════════════════
     // ── DETECTIVE ─────────────────────────────────────────────────────
     // ════════════════════════════════════════════════════════════════════
